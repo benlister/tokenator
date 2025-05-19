@@ -3,7 +3,7 @@
   "id": "1505662264528092928",
   "api": "1.0.0",
   "main": "dist/code.js",
-  "capabilities": [],
+  "permissions": ["teamlibrary"],
   "enableProposedApi": false,
   "documentAccess": "dynamic-page",
   "editorType": [
