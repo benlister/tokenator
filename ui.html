@@ -19,6 +19,19 @@
   .section {
     margin-bottom: 20px;
   }
+  .token {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.2;
+  }
+  .token.fixable {
+    background: #0aa356;
+  }
+  .token.notfixable {
+    background: #c11119;
+  }
   button:focus-visible {
     outline: 2px solid #4760df;
     position: relative;
@@ -109,14 +122,15 @@
 <script>
   document.getElementById("find-spacing").onclick = () => {
     const results = document.getElementById("results");
-    results.innerHTML = "Searching for spacing issues...";
+    results.innerHTML =
+      "Searching your components for <s>John Connor</s> untokenized spacing...";
     results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "find-spacing-issues" } }, "*");
   };
 
   document.getElementById("fix-spacing").onclick = () => {
     const results = document.getElementById("results");
-    results.innerHTML = "Fixing spacing issues...";
+    results.innerHTML = "Tokenating your spacing...";
     results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "fix-spacing-issues" } }, "*");
   };
@@ -162,7 +176,17 @@
     // Process different message types
     if (message.type === "spacing-issues-found") {
       if (message.count > 0) {
-        results.innerHTML = `Found ${message.count} spacing issues in ${message.nodeCount} nodes`;
+        const fixableText =
+          message.fixableCount > 0
+            ? `<span class="token fixable" title="Matching token(s) found. Tokenate them!">${message.fixableCount} fixable</span>`
+            : "";
+        const unfixableText =
+          message.unfixableCount > 0
+            ? `<span class="token notfixable" title="No matching token(s) found">${message.unfixableCount} unfixable</span>`
+            : "";
+        const connector = fixableText && unfixableText ? ", " : "";
+
+        results.innerHTML = `Found ${message.count} spacing issues in ${message.nodeCount} nodes<br>${fixableText}${connector}${unfixableText}`;
         results.style.display = "block";
       } else {
         results.innerHTML = "No spacing issues found";
@@ -186,8 +210,22 @@
     }
 
     if (message.type === "spacing-issues-fixed") {
-      results.innerHTML = `Fixed ${message.count} spacing issues`;
-      if (message.count === 0) {
+      if (message.fixedCount > 0 || message.unfixableCount > 0) {
+        let resultText = "";
+
+        if (message.fixedCount > 0) {
+          resultText += `<span style="color: #22A14B;">Fixed ${message.fixedCount} spacing issues</span>`;
+        }
+
+        if (message.unfixableCount > 0) {
+          if (resultText) resultText += "<br>";
+          resultText += `<span style="color: #F24822;">${message.unfixableCount} issues need manual attention</span>`;
+        }
+
+        results.innerHTML = resultText;
+        results.style.display = "block";
+      } else {
+        results.innerHTML = "No spacing issues to fix";
         setTimeout(() => {
           results.style.display = "none";
         }, 5000);

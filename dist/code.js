@@ -8,7 +8,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-figma.showUI(__html__, { width: 300, height: 565 });
+figma.showUI(__html__, { width: 300, height: 585 });
 // API Availability
 const hasVariablesAPI = Boolean(figma.variables);
 const hasGetLocalVariables = Boolean(hasVariablesAPI && figma.variables.getLocalVariablesAsync);
@@ -162,6 +162,8 @@ function findSpacingIssues() {
                             matchingToken: token, // Store the full token
                             message: token ? `Map to ${token.name} (${token.value}px)` : `No exact token for ${node.itemSpacing}px gap.`,
                         });
+                        // Add marker with appropriate color based on whether token exists
+                        addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                     }
                     const { paddingTop, paddingBottom, paddingLeft, paddingRight } = node;
                     const allPaddingsSameAndPositive = paddingTop > 0 && paddingTop === paddingBottom && paddingTop === paddingLeft && paddingTop === paddingRight;
@@ -172,34 +174,41 @@ function findSpacingIssues() {
                         !isIndividualPaddingBound(node, 'paddingRight')) {
                         const token = findMatchingTokenByValue(paddingTop);
                         issues.push({ node, property: "paddingAll", currentValue: paddingTop, matchingToken: token, message: token ? `Map all padding to ${token.name}` : `No token for ${paddingTop}px uniform padding.` });
+                        addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                     }
                     else {
                         if (paddingLeft > 0 && paddingLeft === paddingRight && !allPaddingsSameAndPositive && !isHorizontalPaddingBound(node)) {
                             const token = findMatchingTokenByValue(paddingLeft);
                             issues.push({ node, property: "horizontalPadding", currentValue: paddingLeft, matchingToken: token, message: token ? `Map horiz. padding to ${token.name}` : `No token for ${paddingLeft}px horiz. padding.` });
+                            addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                         }
                         else {
                             if (paddingLeft > 0 && !isIndividualPaddingBound(node, 'paddingLeft') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
                                 const token = findMatchingTokenByValue(paddingLeft);
                                 issues.push({ node, property: "paddingLeft", currentValue: paddingLeft, matchingToken: token, message: token ? `Map left padding to ${token.name}` : `No token for ${paddingLeft}px left padding.` });
+                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                             }
                             if (paddingRight > 0 && !isIndividualPaddingBound(node, 'paddingRight') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
                                 const token = findMatchingTokenByValue(paddingRight);
                                 issues.push({ node, property: "paddingRight", currentValue: paddingRight, matchingToken: token, message: token ? `Map right padding to ${token.name}` : `No token for ${paddingRight}px right padding.` });
+                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                             }
                         }
                         if (paddingTop > 0 && paddingTop === paddingBottom && !allPaddingsSameAndPositive && !isVerticalPaddingBound(node)) {
                             const token = findMatchingTokenByValue(paddingTop);
                             issues.push({ node, property: "verticalPadding", currentValue: paddingTop, matchingToken: token, message: token ? `Map vert. padding to ${token.name}` : `No token for ${paddingTop}px vert. padding.` });
+                            addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                         }
                         else {
                             if (paddingTop > 0 && !isIndividualPaddingBound(node, 'paddingTop') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
                                 const token = findMatchingTokenByValue(paddingTop);
                                 issues.push({ node, property: "paddingTop", currentValue: paddingTop, matchingToken: token, message: token ? `Map top padding to ${token.name}` : `No token for ${paddingTop}px top padding.` });
+                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                             }
                             if (paddingBottom > 0 && !isIndividualPaddingBound(node, 'paddingBottom') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
                                 const token = findMatchingTokenByValue(paddingBottom);
                                 issues.push({ node, property: "paddingBottom", currentValue: paddingBottom, matchingToken: token, message: token ? `Map bottom padding to ${token.name}` : `No token for ${paddingBottom}px bottom padding.` });
+                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                             }
                         }
                     }
@@ -216,19 +225,28 @@ function findSpacingIssues() {
             checkNode(node);
         }
         console.log(`Found ${issues.length} potential spacing issues.`);
-        issues.forEach(issue => addMarkerToNode(issue.node, "⚠️ Spacing Issue"));
         return issues;
     });
 }
-function addMarkerToNode(node, name) {
+// Updated function to add color-coded markers based on whether the issue can be fixed
+function addMarkerToNode(node, name, canFix) {
     try {
-        const existingMarker = figma.currentPage.findOne(n => n.name === name && n.getPluginData("markerFor") === node.id);
-        if (existingMarker)
-            return;
+        // Remove any existing markers for this node first
+        const existingMarkers = figma.currentPage.findAll(n => n.type === "ELLIPSE" &&
+            n.getPluginData("markerFor") === node.id);
+        existingMarkers.forEach(marker => marker.remove());
+        // Create new marker
         const indicator = figma.createEllipse();
-        indicator.name = name;
+        // Set appropriate name and color based on whether the issue can be fixed
+        if (canFix) {
+            indicator.name = "✅ Can Fix Spacing";
+            indicator.fills = [{ type: 'SOLID', color: { r: 0.2, g: 0.8, b: 0.2 } }]; // Green
+        }
+        else {
+            indicator.name = "⚠️ No Token Match";
+            indicator.fills = [{ type: 'SOLID', color: { r: 1, g: 0.2, b: 0.2 } }]; // Red
+        }
         indicator.resize(8, 8);
-        indicator.fills = [{ type: 'SOLID', color: { r: 1, g: 0.2, b: 0.2 } }];
         const absoluteX = node.absoluteTransform[0][2];
         const absoluteY = node.absoluteTransform[1][2];
         indicator.x = absoluteX - 12;
@@ -285,7 +303,14 @@ function fixSpacingIssues() {
         clearMarkers();
         const issues = yield findSpacingIssues();
         let fixedCount = 0;
+        let unfixableCount = 0;
         console.log(`Attempting to fix ${issues.length} spacing issues.`);
+        // Count issues that don't have matching tokens
+        issues.forEach(issue => {
+            if (!issue.matchingToken) {
+                unfixableCount++;
+            }
+        });
         for (const issue of issues) {
             // Ensure matchingToken and its variableObject are valid before proceeding
             if (issue.matchingToken && issue.matchingToken.variableObject) {
@@ -321,55 +346,23 @@ function fixSpacingIssues() {
                     fixedCount++;
                 }
             }
-            else if (issue.matchingToken && !issue.matchingToken.variableObject) {
-                console.warn(`Skipping issue for ${issue.node.name} property ${issue.property} due to missing variableObject in token:`, issue.matchingToken);
-            }
-            else if (!issue.matchingToken) {
-                // This case should ideally be handled by the message in SpacingIssue,
-                // but good to log if we reach here without a token.
-                console.log(`No matching token found for ${issue.node.name} property ${issue.property} with value ${issue.currentValue}px. Cannot fix.`);
-            }
         }
         console.log(`Successfully applied ${fixedCount} spacing variable bindings.`);
+        console.log(`Unable to fix ${unfixableCount} issues due to missing matching tokens.`);
         if (fixedCount > 0) {
-            figma.notify(`Applied ${fixedCount} spacing variable bindings.`);
+            figma.notify(`Applied ${fixedCount} spacing variable bindings. ${unfixableCount > 0 ? `${unfixableCount} values have no matching tokens (marked in red).` : ''}`);
         }
-        else if (issues.length > 0) {
-            figma.notify(`Found ${issues.length} issues, but no matching tokens were applied successfully. Check console for details.`);
+        else if (unfixableCount > 0) {
+            figma.notify(`Found ${unfixableCount} spacing values without matching tokens (marked in red).`);
         }
-        else {
-            figma.notify(`No unlinked spacing values found or fixed.`);
+        else if (issues.length === 0) {
+            figma.notify(`No unlinked spacing values found.`);
         }
-        clearMarkers();
-        yield findSpacingIssues();
-        return fixedCount;
+        // Instead of running findSpacingIssues again, let's return our counts
+        return { fixed: fixedCount, unfixable: unfixableCount };
     });
 }
-function clearMarkers() {
-    try {
-        const markers = figma.currentPage.children.filter(node => node.type === "ELLIPSE" &&
-            (node.name === "⚠️ Spacing Issue" || node.name === "🎨 Color Issue") &&
-            node.getPluginData("markerFor") !== "");
-        let clearedCount = 0;
-        markers.forEach(markerNode => {
-            if (markerNode.type === "ELLIPSE") {
-                markerNode.remove();
-                clearedCount++;
-            }
-        });
-        console.log(`Cleared ${clearedCount} markers.`);
-        return clearedCount;
-    }
-    catch (error) {
-        let message = 'Unknown error';
-        if (error instanceof Error)
-            message = error.message;
-        else if (typeof error === 'string')
-            message = error;
-        console.error(`Error clearing markers: ${message}`);
-        return 0;
-    }
-}
+// Update to the message handler in the main code
 figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
     console.log("Received message from UI:", msg.type);
     try {
@@ -377,23 +370,33 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             clearMarkers();
             const issues = yield findSpacingIssues();
             const uniqueNodeIds = new Set(issues.map(issue => issue.node.id));
+            // Count issues that can be fixed vs. those that can't
+            const fixableIssues = issues.filter(issue => issue.matchingToken !== null);
+            const unfixableIssues = issues.filter(issue => issue.matchingToken === null);
             figma.ui.postMessage({
                 type: 'spacing-issues-found',
                 count: issues.length,
+                fixableCount: fixableIssues.length,
+                unfixableCount: unfixableIssues.length,
                 nodeCount: uniqueNodeIds.size,
             });
             if (issues.length > 0) {
-                figma.notify(`Found ${issues.length} potential spacing issues on ${uniqueNodeIds.size} nodes. Markers added.`);
+                const fixableMessage = fixableIssues.length > 0 ?
+                    `${fixableIssues.length} can be auto-fixed (green markers)` : '';
+                const unfixableMessage = unfixableIssues.length > 0 ?
+                    `${unfixableIssues.length} have no matching tokens (red markers)` : '';
+                figma.notify(`Found ${issues.length} spacing issues. ${fixableMessage}${fixableMessage && unfixableMessage ? '. ' : ''}${unfixableMessage}`);
             }
             else {
                 figma.notify(`No unlinked spacing values found.`);
             }
         }
         else if (msg.type === 'fix-spacing-issues') {
-            const fixedCount = yield fixSpacingIssues();
+            const result = yield fixSpacingIssues();
             figma.ui.postMessage({
                 type: 'spacing-issues-fixed',
-                count: fixedCount
+                fixedCount: result.fixed,
+                unfixableCount: result.unfixable
             });
         }
         else if (msg.type === 'clear-markers') {
@@ -419,4 +422,31 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
         figma.ui.postMessage({ type: 'error', message: message });
     }
 });
-console.log("Spacing Linter Plugin Loaded (V7). Waiting for UI interaction.");
+function clearMarkers() {
+    try {
+        const markers = figma.currentPage.children.filter(node => node.type === "ELLIPSE" &&
+            (node.name === "⚠️ No Token Match" ||
+                node.name === "✅ Can Fix Spacing" ||
+                node.name === "⚠️ Spacing Issue" ||
+                node.name === "🎨 Color Issue") &&
+            node.getPluginData("markerFor") !== "");
+        let clearedCount = 0;
+        markers.forEach(markerNode => {
+            if (markerNode.type === "ELLIPSE") {
+                markerNode.remove();
+                clearedCount++;
+            }
+        });
+        console.log(`Cleared ${clearedCount} markers.`);
+        return clearedCount;
+    }
+    catch (error) {
+        let message = 'Unknown error';
+        if (error instanceof Error)
+            message = error.message;
+        else if (typeof error === 'string')
+            message = error;
+        console.error(`Error clearing markers: ${message}`);
+        return 0;
+    }
+}
