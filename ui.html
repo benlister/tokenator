@@ -1,44 +1,75 @@
 <style>
   body {
-    font-family: Inter, sans-serif;
+    font-family: Inter, Helvetica, Arial, sans-serif;
     padding: 20px;
+    color: #fff;
+    background-color: #0d0e0a;
   }
   h3 {
     margin-top: 0;
-    margin-bottom: 12px;
+    margin-bottom: 4px;
     font-size: 14px;
+  }
+  p {
+    margin: 0 0 20px;
+    color: #fff;
+    font-size: 11px;
+    line-height: 1.4;
   }
   .section {
     margin-bottom: 20px;
   }
+  button:focus-visible {
+    outline: 2px solid #4760df;
+    position: relative;
+  }
   button {
     display: block;
     width: 100%;
+    color: #191919;
+    font-size: 11px;
+    letter-spacing: 0.04;
     padding: 8px;
-    margin-bottom: 8px;
+    font-weight: 600;
+    margin-bottom: 12px;
     border-radius: 6px;
     border: none;
     cursor: pointer;
   }
   .primary {
-    background-color: #18a0fb;
+    background-color: #4061e7;
     color: white;
+  }
+  .primary:hover {
+    background-color: #3451c5;
   }
   .secondary {
-    background-color: #f5f5f5;
-    color: black;
+    border: 1px solid #797979;
+    background-color: #0d0e0a;
+    color: #ffffff;
   }
-  .danger {
-    background-color: #f24822;
-    color: white;
+  .secondary:hover {
+    background-color: #363636;
+    border-color: #86868686;
+  }
+  .tertiary {
+    background-color: #0d0e0a;
+    color: #ffffff;
+  }
+  .tertiary:hover {
+    background-color: #363636;
+    color: #ffffff;
   }
   #results {
     margin-top: 16px;
+    padding: 16px;
+    font-size: 13px;
     font-size: 12px;
-    background: #f5f5f5;
+    background: #3e2a6d;
+    border-left: 4px solid #51319c;
     padding: 10px;
+    color: #ffffff;
     border-radius: 4px;
-    max-height: 100px;
     overflow-y: auto;
   }
 
@@ -56,8 +87,12 @@
 />
 <div class="section">
   <h3>Tokenate your components</h3>
-  <button id="find-spacing" class="primary">Find Spacing Issues</button>
-  <button id="clear-markers" class="danger">Clear All Markers</button>
+  <p>
+    Find manual spacing values and auto-replace them with your spacing tokens.
+    Run it on a single component or the entire page.
+  </p>
+  <button id="find-spacing" class="secondary">Find Spacing Issues</button>
+  <button id="clear-markers" class="tertiary">Clear All Markers</button>
 </div>
 
 <!-- Hidden for now
@@ -67,37 +102,45 @@
   <button id="fix-colors" class="secondary">Auto-Fix Colors</button>
 </div>
 -->
-<button id="fix-spacing" class="secondary">Auto-Fix Spacing</button>
+<button id="fix-spacing" class="primary">Auto-Fix Spacing</button>
 
-<div id="results">Results will appear here</div>
+<div id="results" style="display: none"></div>
 
 <script>
   document.getElementById("find-spacing").onclick = () => {
-    document.getElementById("results").innerHTML =
-      "Searching for spacing issues...";
+    const results = document.getElementById("results");
+    results.innerHTML = "Searching for spacing issues...";
+    results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "find-spacing-issues" } }, "*");
   };
 
   document.getElementById("fix-spacing").onclick = () => {
-    document.getElementById("results").innerHTML = "Fixing spacing issues...";
+    const results = document.getElementById("results");
+    results.innerHTML = "Fixing spacing issues...";
+    results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "fix-spacing-issues" } }, "*");
   };
 
   document.getElementById("clear-markers").onclick = () => {
-    document.getElementById("results").innerHTML = "Clearing markers...";
+    const results = document.getElementById("results");
+    results.innerHTML = "Clearing markers...";
+    results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "clear-markers" } }, "*");
   };
 
   // COMMENT OUT THESE FUNCTIONS SINCE THE BUTTONS DON'T EXIST
   /*
   document.getElementById("find-colors").onclick = () => {
-    document.getElementById("results").innerHTML =
-      "Searching for color issues...";
+    const results = document.getElementById("results");
+    results.innerHTML = "Searching for color issues...";
+    results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "find-color-issues" } }, "*");
   };
 
   document.getElementById("fix-colors").onclick = () => {
-    document.getElementById("results").innerHTML = "Fixing color issues...";
+    const results = document.getElementById("results");
+    results.innerHTML = "Fixing color issues...";
+    results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "fix-color-issues" } }, "*");
   };
   */
@@ -109,30 +152,68 @@
     if (message.type === "error") {
       results.innerHTML = `Error: ${message.message}`;
       results.style.color = "#F24822"; // Red color for errors
+      results.style.display = "block"; // Make sure it's visible
       return; // Exit early if it's an error
     }
 
     // Reset text color for non-error messages
     results.style.color = "";
 
+    // Process different message types
     if (message.type === "spacing-issues-found") {
-      results.innerHTML = `Found ${message.count} spacing issues in ${message.nodeCount} nodes`;
+      if (message.count > 0) {
+        results.innerHTML = `Found ${message.count} spacing issues in ${message.nodeCount} nodes`;
+        results.style.display = "block";
+      } else {
+        results.innerHTML = "No spacing issues found";
+        // Set a timeout to hide the results after 3 seconds for "no issues" messages
+        setTimeout(() => {
+          results.style.display = "none";
+        }, 3000);
+      }
     }
 
     if (message.type === "color-issues-found") {
-      results.innerHTML = `Found ${message.count} color issues`;
+      if (message.count > 0) {
+        results.innerHTML = `Found ${message.count} color issues`;
+        results.style.display = "block";
+      } else {
+        results.innerHTML = "No color issues found";
+        setTimeout(() => {
+          results.style.display = "none";
+        }, 3000);
+      }
     }
 
     if (message.type === "spacing-issues-fixed") {
       results.innerHTML = `Fixed ${message.count} spacing issues`;
+      if (message.count === 0) {
+        setTimeout(() => {
+          results.style.display = "none";
+        }, 5000);
+      }
     }
 
     if (message.type === "color-issues-fixed") {
       results.innerHTML = `Fixed ${message.count} color issues`;
+      if (message.count === 0) {
+        setTimeout(() => {
+          results.style.display = "none";
+        }, 3000);
+      }
     }
 
     if (message.type === "markers-cleared") {
       results.innerHTML = "All markers cleared";
+      setTimeout(() => {
+        results.style.display = "none";
+      }, 3000);
+    }
+
+    // Add API check message handling
+    if (message.type === "api-check") {
+      // Don't show anything for API checks
+      results.style.display = "none";
     }
   };
 </script>

@@ -1,6 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
-figma.showUI(__html__, { width: 300, height: 515 });
+figma.showUI(__html__, { width: 300, height: 565 });
 
 // API Availability
 const hasVariablesAPI = Boolean(figma.variables);
