@@ -73,11 +73,19 @@
     background-color: #363636;
     color: #ffffff;
   }
+  .destructive {
+    background-color: #c11119;
+    color: white;
+  }
+  .destructive:hover {
+    background-color: #99161d;
+  }
   #results {
     margin-top: 16px;
     padding: 16px;
     font-size: 13px;
     font-size: 12px;
+    line-height: 1.6;
     background: #3e2a6d;
     border-left: 4px solid #51319c;
     padding: 10px;
@@ -108,6 +116,11 @@
   <button id="clear-markers" class="tertiary">Clear All Markers</button>
 </div>
 
+<!-- Main action buttons including the new undo button -->
+<div class="actions">
+  <button id="fix-spacing" class="primary">Auto-Fix Spacing</button>
+</div>
+
 <!-- Hidden for now
 <div class="section">
   <h3>Color Tokens</h3>
@@ -115,10 +128,17 @@
   <button id="fix-colors" class="secondary">Auto-Fix Colors</button>
 </div>
 -->
-<button id="fix-spacing" class="primary">Auto-Fix Spacing</button>
 
 <div id="results" style="display: none"></div>
-
+<div class="actions" style="margin-top: 20px">
+  <button
+    id="revert-spacing"
+    class="destructive"
+    title="Convert token bindings back to static values"
+  >
+    Undo Tokenate (replace with static values)
+  </button>
+</div>
 <script>
   document.getElementById("find-spacing").onclick = () => {
     const results = document.getElementById("results");
@@ -140,6 +160,23 @@
     results.innerHTML = "Clearing markers...";
     results.style.display = "block";
     parent.postMessage({ pluginMessage: { type: "clear-markers" } }, "*");
+  };
+
+  // New handler for the revert button
+  document.getElementById("revert-spacing").onclick = () => {
+    if (
+      confirm(
+        "This will convert all token-bound spacing to static pixel values. This action can't be undone with the plugin. Continue?"
+      )
+    ) {
+      const results = document.getElementById("results");
+      results.innerHTML = "Converting tokens to static values...";
+      results.style.display = "block";
+      parent.postMessage(
+        { pluginMessage: { type: "revert-spacing-bindings" } },
+        "*"
+      );
+    }
   };
 
   // COMMENT OUT THESE FUNCTIONS SINCE THE BUTTONS DON'T EXIST
@@ -214,12 +251,12 @@
         let resultText = "";
 
         if (message.fixedCount > 0) {
-          resultText += `<span style="color: #22A14B;">Fixed ${message.fixedCount} spacing issues</span>`;
+          resultText += `<span>Fixed ${message.fixedCount} spacing issues</span>`;
         }
 
         if (message.unfixableCount > 0) {
           if (resultText) resultText += "<br>";
-          resultText += `<span style="color: #F24822;">${message.unfixableCount} issues need manual attention</span>`;
+          resultText += `<span>${message.unfixableCount} issues need manual changes</span>`;
         }
 
         results.innerHTML = resultText;
@@ -230,6 +267,19 @@
           results.style.display = "none";
         }, 5000);
       }
+    }
+
+    // Handler for the new revert operation
+    if (message.type === "spacing-bindings-reverted") {
+      if (message.count > 0) {
+        results.innerHTML = `Converted ${message.count} token bindings to static values`;
+      } else {
+        results.innerHTML = "No token bindings found to convert";
+      }
+      results.style.display = "block";
+      setTimeout(() => {
+        results.style.display = "none";
+      }, 5000);
     }
 
     if (message.type === "color-issues-fixed") {

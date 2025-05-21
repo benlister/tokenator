@@ -362,6 +362,69 @@ function fixSpacingIssues() {
         return { fixed: fixedCount, unfixable: unfixableCount };
     });
 }
+function revertSpacingBindingsToStatic() {
+    return __awaiter(this, void 0, void 0, function* () {
+        let revertedCount = 0;
+        // Helper function to remove binding and set static value
+        function removeBindingAndSetStatic(node, property) {
+            try {
+                // Check if the property has a binding
+                if (!node.boundVariables || !node.boundVariables[property]) {
+                    return false;
+                }
+                // Get the current computed value before removing the binding
+                const currentValue = node[property];
+                // Remove the binding
+                node.setBoundVariable(property, null);
+                // Set the static value to match what it was
+                node[property] = currentValue;
+                return true;
+            }
+            catch (e) {
+                console.error(`Error removing binding for ${property} on node "${node.name}":`, e);
+                return false;
+            }
+        }
+        // Function to process a node and revert its spacing bindings
+        function processNode(node) {
+            let nodeRevertCount = 0;
+            if (isAutoLayoutNode(node)) {
+                // List of all potential spacing properties we might have bound
+                const spacingProperties = [
+                    'itemSpacing',
+                    'paddingTop',
+                    'paddingBottom',
+                    'paddingLeft',
+                    'paddingRight'
+                ];
+                // Check each property and revert if bound
+                for (const property of spacingProperties) {
+                    if (removeBindingAndSetStatic(node, property)) {
+                        nodeRevertCount++;
+                        console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
+                    }
+                }
+            }
+            // Process children recursively
+            if ("children" in node) {
+                for (const child of node.children) {
+                    nodeRevertCount += processNode(child);
+                }
+            }
+            return nodeRevertCount;
+        }
+        // Get nodes to process (selection or all page nodes)
+        const nodesToProcess = figma.currentPage.selection.length > 0
+            ? figma.currentPage.selection
+            : figma.currentPage.children;
+        // Process all nodes
+        for (const node of nodesToProcess) {
+            revertedCount += processNode(node);
+        }
+        console.log(`Reverted ${revertedCount} spacing token bindings to static values.`);
+        return revertedCount;
+    });
+}
 // Update to the message handler in the main code
 figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
     console.log("Received message from UI:", msg.type);
@@ -407,6 +470,19 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             });
             if (clearedCount > 0)
                 figma.notify(`Cleared ${clearedCount} markers.`);
+        }
+        else if (msg.type === 'revert-spacing-bindings') {
+            const revertedCount = yield revertSpacingBindingsToStatic();
+            figma.ui.postMessage({
+                type: 'spacing-bindings-reverted',
+                count: revertedCount
+            });
+            if (revertedCount > 0) {
+                figma.notify(`Converted ${revertedCount} token bindings back to static values.`);
+            }
+            else {
+                figma.notify(`No spacing token bindings found to revert.`);
+            }
         }
     }
     catch (error) {
