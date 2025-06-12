@@ -43,25 +43,43 @@ interface BorderRadiusIssue {
 // Union type for all issues
 type AllIssues = SpacingIssue | BorderRadiusIssue;
 
+interface TokenCollection {
+  id: string;
+  name: string;
+  isLocal: boolean;
+}
 
+// Enhanced caching system - cache tokens per collection
+let cachedSpacingTokensByCollection: Map<string, SpacingToken[]> = new Map();
+let cachedBorderRadiusTokensByCollection: Map<string, BorderRadiusToken[]> = new Map();
+let cachedCollections: TokenCollection[] | null = null;
+let collectionsTimestamp: number = 0;
+
+// Clear old single-collection cache variables (keep for fallback)
 let cachedSpacingTokens: SpacingToken[] | null = null;
-
-let cacheTimestamp: number = 0;
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-
 let cachedBorderRadiusTokens: BorderRadiusToken[] | null = null;
+let cacheTimestamp: number = 0;
 let borderRadiusCacheTimestamp: number = 0;
 
-async function getBorderRadiusVariables(forceRefresh: boolean = false): Promise<BorderRadiusToken[]> {
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+async function getBorderRadiusVariables(
+  forceRefresh: boolean = false,
+  filterByCollectionId?: string
+): Promise<BorderRadiusToken[]> {
   const now = Date.now();
   
-  // Return cached results if they're still valid
-  if (!forceRefresh && cachedBorderRadiusTokens && (now - borderRadiusCacheTimestamp) < CACHE_DURATION) {
-    console.log(`Using cached border radius tokens (${cachedBorderRadiusTokens.length} tokens)`);
-    return cachedBorderRadiusTokens;
+  // Create cache key
+  const cacheKey = filterByCollectionId || 'all';
+  
+  // Check collection-specific cache
+  if (!forceRefresh && cachedBorderRadiusTokensByCollection.has(cacheKey)) {
+    const cached = cachedBorderRadiusTokensByCollection.get(cacheKey)!;
+    console.log(`Using cached border radius tokens for ${cacheKey} (${cached.length} tokens)`);
+    return cached;
   }
 
-  console.log("Fetching fresh border radius variables...");
+  console.log(`Fetching fresh border radius variables for collection: ${cacheKey}`);
   const allResolvedVariables = await getAllVariablesAndImportLibraries();
   console.log(`Processing ${allResolvedVariables.length} variables for border radius tokens.`);
 
@@ -69,6 +87,11 @@ async function getBorderRadiusVariables(forceRefresh: boolean = false): Promise<
 
   for (const variable of allResolvedVariables) {
     if (variable.resolvedType !== 'FLOAT') {
+      continue;
+    }
+
+    // Filter by collection if specified
+    if (filterByCollectionId && variable.variableCollectionId !== filterByCollectionId) {
       continue;
     }
 
@@ -95,11 +118,16 @@ async function getBorderRadiusVariables(forceRefresh: boolean = false): Promise<
     }
   }
 
-  // Cache the results
-  cachedBorderRadiusTokens = borderRadiusTokens;
-  borderRadiusCacheTimestamp = now;
+  // Cache the results by collection
+  cachedBorderRadiusTokensByCollection.set(cacheKey, borderRadiusTokens);
+  
+  // Also update the legacy cache if this is for "all" collections
+  if (!filterByCollectionId) {
+    cachedBorderRadiusTokens = borderRadiusTokens;
+    borderRadiusCacheTimestamp = now;
+  }
 
-  console.log(`Total border radius tokens found and cached: ${borderRadiusTokens.length}`);
+  console.log(`Total border radius tokens found and cached for ${cacheKey}: ${borderRadiusTokens.length}`);
   return borderRadiusTokens;
 }
 
@@ -208,16 +236,19 @@ async function getAllVariablesAndImportLibraries(): Promise<Variable[]> {
           const collectionStart = Date.now();
           const libraryVariablesInCollection = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libCollection.key);
           
-          // Filter to only spacing-related variables by name before importing
-          const spacingVariables = libraryVariablesInCollection.filter(libVar => 
-            /space|spacing|gap|padding|margin|size|grid/i.test(libVar.name)
-          );
+          // Filter to include both spacing AND border radius related variables by name before importing
+          const relevantVariables = libraryVariablesInCollection.filter(libVar => {
+            const name = libVar.name;
+            const isSpacingName = /space|spacing|gap|padding|margin|size|grid/i.test(name);
+            const isBorderRadiusName = /radius|corner|rounded|border.*radius|br-/i.test(name);
+            return isSpacingName || isBorderRadiusName;
+          });
           
-          console.log(`Collection "${libCollection.name}": ${libraryVariablesInCollection.length} total, ${spacingVariables.length} spacing-related`);
+          console.log(`Collection "${libCollection.name}": ${libraryVariablesInCollection.length} total, ${relevantVariables.length} spacing/border-radius-related`);
           
           // Process in batches
-          for (let i = 0; i < spacingVariables.length; i += BATCH_SIZE) {
-            const batch = spacingVariables.slice(i, i + BATCH_SIZE);
+          for (let i = 0; i < relevantVariables.length; i += BATCH_SIZE) {
+            const batch = relevantVariables.slice(i, i + BATCH_SIZE);
             const batchPromises = batch.map(async (libVarStub) => {
               if (!processedVariableKeys.has(libVarStub.key)) {
                 try {
@@ -240,7 +271,7 @@ async function getAllVariablesAndImportLibraries(): Promise<Variable[]> {
             });
             
             // Small delay between batches to prevent API rate limiting
-            if (i + BATCH_SIZE < spacingVariables.length) {
+            if (i + BATCH_SIZE < relevantVariables.length) {
               await new Promise(resolve => setTimeout(resolve, 50));
             }
           }
@@ -262,16 +293,23 @@ async function getAllVariablesAndImportLibraries(): Promise<Variable[]> {
   console.log(`Total unique variables processed (local + imported library): ${allVariables.length}`);
   return allVariables;
 }
-async function getSpacingVariables(forceRefresh: boolean = false): Promise<SpacingToken[]> {
+async function getSpacingVariables(
+  forceRefresh: boolean = false, 
+  filterByCollectionId?: string
+): Promise<SpacingToken[]> {
   const now = Date.now();
   
-  // Return cached results if they're still valid
-  if (!forceRefresh && cachedSpacingTokens && (now - cacheTimestamp) < CACHE_DURATION) {
-    console.log(`Using cached spacing tokens (${cachedSpacingTokens.length} tokens)`);
-    return cachedSpacingTokens;
+  // Create cache key - use collection ID or 'all' for no filter
+  const cacheKey = filterByCollectionId || 'all';
+  
+  // Check collection-specific cache
+  if (!forceRefresh && cachedSpacingTokensByCollection.has(cacheKey)) {
+    const cached = cachedSpacingTokensByCollection.get(cacheKey)!;
+    console.log(`Using cached spacing tokens for ${cacheKey} (${cached.length} tokens)`);
+    return cached;
   }
 
-  console.log("Fetching fresh spacing variables...");
+  console.log(`Fetching fresh spacing variables for collection: ${cacheKey}`);
   const allResolvedVariables = await getAllVariablesAndImportLibraries();
   console.log(`Processing ${allResolvedVariables.length} variables for spacing tokens.`);
 
@@ -279,6 +317,11 @@ async function getSpacingVariables(forceRefresh: boolean = false): Promise<Spaci
 
   for (const variable of allResolvedVariables) {
     if (variable.resolvedType !== 'FLOAT') {
+      continue;
+    }
+
+    // Filter by collection if specified
+    if (filterByCollectionId && variable.variableCollectionId !== filterByCollectionId) {
       continue;
     }
 
@@ -304,13 +347,19 @@ async function getSpacingVariables(forceRefresh: boolean = false): Promise<Spaci
     }
   }
 
-  // Cache the results
-  cachedSpacingTokens = spacingTokens;
-  cacheTimestamp = now;
+  // Cache the results by collection
+  cachedSpacingTokensByCollection.set(cacheKey, spacingTokens);
+  
+  // Also update the legacy cache if this is for "all" collections
+  if (!filterByCollectionId) {
+    cachedSpacingTokens = spacingTokens;
+    cacheTimestamp = now;
+  }
 
-  console.log(`Total spacing tokens found and cached: ${spacingTokens.length}`);
+  console.log(`Total spacing tokens found and cached for ${cacheKey}: ${spacingTokens.length}`);
   return spacingTokens;
 }
+
 
 interface SpacingIssue {
   node: AutoLayoutNode;
@@ -324,8 +373,8 @@ function isAutoLayoutNode(node: SceneNode): node is AutoLayoutNode {
     return node.type === "FRAME" || node.type === "COMPONENT" || node.type === "INSTANCE";
 }
 
-async function findSpacingIssues(): Promise<SpacingIssue[]> {
-  const spacingTokens = await getSpacingVariables(); // Uses cache by default
+async function findSpacingIssues(filterByCollectionId?: string): Promise<SpacingIssue[]> {
+  const spacingTokens = await getSpacingVariables(false, filterByCollectionId);
   const issues: SpacingIssue[] = [];
   
   // Pre-create a Map for faster token lookup by value
@@ -441,7 +490,8 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
   const selection = figma.currentPage.selection;
   const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
   
-  console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for spacing issues...`);
+  const collectionText = filterByCollectionId ? ` using collection filter` : '';
+  console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for spacing issues${collectionText}...`);
   
   for (const node of nodesToCheck) {
     checkNode(node);
@@ -450,6 +500,7 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
   console.log(`Found ${issues.length} potential spacing issues.`);
   return issues;
 }
+
 
 // Updated function to add color-coded markers based on whether the issue can be fixed
 // Updated function to add different markers based on issue type
@@ -541,13 +592,14 @@ async function trySetBoundVariable(
   }
 }
 
-async function fixSpacingIssues(): Promise<{fixed: number, unfixable: number}> {
+async function fixSpacingIssues(filterByCollectionId?: string): Promise<{fixed: number, unfixable: number}> {
   clearMarkers();
-  const issues = await findSpacingIssues();
+  const issues = await findSpacingIssues(filterByCollectionId);
   let fixedCount = 0;
   let unfixableCount = 0;
 
-  console.log(`Attempting to fix ${issues.length} spacing issues.`);
+  const collectionText = filterByCollectionId ? ` using collection filter` : '';
+  console.log(`Attempting to fix ${issues.length} spacing issues${collectionText}.`);
   
   // Count issues that don't have matching tokens
   issues.forEach(issue => {
@@ -605,6 +657,7 @@ async function fixSpacingIssues(): Promise<{fixed: number, unfixable: number}> {
   // Instead of running findSpacingIssues again, let's return our counts
   return { fixed: fixedCount, unfixable: unfixableCount };
 }
+
 
 async function revertSpacingBindingsToStatic(): Promise<number> {
   let revertedCount = 0;
@@ -683,13 +736,24 @@ async function revertSpacingBindingsToStatic(): Promise<number> {
 // Update to the message handler in the main code
 // Add this to your message handler - replace the existing figma.ui.onmessage
 // Updated message handler with all new border radius functionality
+// Enhanced message handler with collection filtering support
 figma.ui.onmessage = async (msg) => {
   console.log("Received message from UI:", msg.type);
   try {
-    if (msg.type === 'find-all-issues') {
-      // New combined find function
+    if (msg.type === 'get-collections') {
+      // New message type to fetch available collections
+      const collections = await getAvailableCollections();
+      figma.ui.postMessage({
+        type: 'collections-loaded',
+        collections: collections
+      });
+    } else if (msg.type === 'find-all-issues') {
+      // Enhanced find function with collection filters
       clearMarkers();
-      const results = await findAllIssues();
+      const spacingCollectionId = msg.spacingCollectionId || undefined;
+      const borderRadiusCollectionId = msg.borderRadiusCollectionId || undefined;
+      
+      const results = await findAllIssues(spacingCollectionId, borderRadiusCollectionId);
       
       const uniqueNodeIds = new Set([
         ...results.spacingIssues.map(issue => issue.node.id),
@@ -721,9 +785,10 @@ figma.ui.onmessage = async (msg) => {
         figma.notify(`No tokenization issues found.`);
       }
     } else if (msg.type === 'find-spacing-issues') {
-      // Keep existing spacing-only function for backwards compatibility
+      // Keep existing spacing-only function with optional collection filter
       clearMarkers();
-      const issues = await findSpacingIssues();
+      const spacingCollectionId = msg.spacingCollectionId || undefined;
+      const issues = await findSpacingIssues(spacingCollectionId);
       const uniqueNodeIds = new Set(issues.map(issue => issue.node.id));
       
       const fixableIssues = issues.filter(issue => issue.matchingToken !== null);
@@ -748,15 +813,16 @@ figma.ui.onmessage = async (msg) => {
         figma.notify(`No unlinked spacing values found.`);
       }
     } else if (msg.type === 'fix-spacing-issues') {
-      const result = await fixSpacingIssues();
+      const spacingCollectionId = msg.spacingCollectionId || undefined;
+      const result = await fixSpacingIssues(spacingCollectionId);
       figma.ui.postMessage({
         type: 'spacing-issues-fixed',
         fixedCount: result.fixed,
         unfixableCount: result.unfixable
       });
     } else if (msg.type === 'fix-border-radius-issues') {
-      // New border radius fix function
-      const result = await fixBorderRadiusIssues();
+      const borderRadiusCollectionId = msg.borderRadiusCollectionId || undefined;
+      const result = await fixBorderRadiusIssues(borderRadiusCollectionId);
       figma.ui.postMessage({
         type: 'border-radius-issues-fixed',
         fixedCount: result.fixed,
@@ -812,11 +878,17 @@ figma.ui.onmessage = async (msg) => {
         figma.notify(`No spacing token bindings found to revert.`);
       }
     } else if (msg.type === 'refresh-variables') {
-      // Force refresh both caches
+      // Force refresh all caches
       console.log("Force refreshing variables cache...");
+      
+      // Clear collection-specific caches
+      cachedSpacingTokensByCollection.clear();
+      cachedBorderRadiusTokensByCollection.clear();
+      
       await Promise.all([
         getSpacingVariables(true),
-        getBorderRadiusVariables(true)
+        getBorderRadiusVariables(true),
+        getAvailableCollections(true)
       ]);
       figma.notify("Variables cache refreshed");
       figma.ui.postMessage({
@@ -868,8 +940,8 @@ function clearMarkers() {
 }
 
 
-async function findBorderRadiusIssues(): Promise<BorderRadiusIssue[]> {
-  const borderRadiusTokens = await getBorderRadiusVariables(); // Uses cache by default
+async function findBorderRadiusIssues(filterByCollectionId?: string): Promise<BorderRadiusIssue[]> {
+  const borderRadiusTokens = await getBorderRadiusVariables(false, filterByCollectionId);
   const issues: BorderRadiusIssue[] = [];
   
   // Pre-create a Map for faster token lookup by value
@@ -888,7 +960,6 @@ async function findBorderRadiusIssues(): Promise<BorderRadiusIssue[]> {
   }
 
   function areAllRadiiSameAndPositive(node: BorderRadiusNode): boolean {
-    // Double-check that the node has radius properties
     if (!hasRadiusProperties(node)) return false;
     
     const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
@@ -967,7 +1038,8 @@ async function findBorderRadiusIssues(): Promise<BorderRadiusIssue[]> {
   const selection = figma.currentPage.selection;
   const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
   
-  console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for border radius issues...`);
+  const collectionText = filterByCollectionId ? ` using collection filter` : '';
+  console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for border radius issues${collectionText}...`);
   
   for (const node of nodesToCheck) {
     checkNode(node);
@@ -977,19 +1049,22 @@ async function findBorderRadiusIssues(): Promise<BorderRadiusIssue[]> {
   return issues;
 }
 
-async function findAllIssues(): Promise<{
+async function findAllIssues(
+  spacingCollectionId?: string,
+  borderRadiusCollectionId?: string
+): Promise<{
   spacingIssues: SpacingIssue[];
   borderRadiusIssues: BorderRadiusIssue[];
   totalIssues: number;
   fixableIssues: number;
   unfixableIssues: number;
 }> {
-  console.log("Finding all tokenization issues...");
+  console.log("Finding all tokenization issues with collection filters...");
   
-  // Run both detection functions
+  // Run both detection functions with their respective collection filters
   const [spacingIssues, borderRadiusIssues] = await Promise.all([
-    findSpacingIssues(),
-    findBorderRadiusIssues()
+    findSpacingIssues(spacingCollectionId),
+    findBorderRadiusIssues(borderRadiusCollectionId)
   ]);
 
   const totalIssues = spacingIssues.length + borderRadiusIssues.length;
@@ -1040,12 +1115,13 @@ async function trySetBoundVariableRadius(
 }
 
 // Fix border radius issues
-async function fixBorderRadiusIssues(): Promise<{fixed: number, unfixable: number}> {
-  const issues = await findBorderRadiusIssues();
+async function fixBorderRadiusIssues(filterByCollectionId?: string): Promise<{fixed: number, unfixable: number}> {
+  const issues = await findBorderRadiusIssues(filterByCollectionId);
   let fixedCount = 0;
   let unfixableCount = 0;
 
-  console.log(`Attempting to fix ${issues.length} border radius issues.`);
+  const collectionText = filterByCollectionId ? ` using collection filter` : '';
+  console.log(`Attempting to fix ${issues.length} border radius issues${collectionText}.`);
   
   // Count issues that don't have matching tokens
   issues.forEach(issue => {
@@ -1195,4 +1271,55 @@ async function revertAllBindingsToStatic(): Promise<{spacingCount: number, borde
     borderRadiusCount: borderRadiusRevertedCount, 
     totalCount 
   };
+}
+
+
+
+// Get all available variable collections
+async function getAvailableCollections(forceRefresh: boolean = false): Promise<TokenCollection[]> {
+  const now = Date.now();
+  
+  if (!forceRefresh && cachedCollections && (now - collectionsTimestamp) < CACHE_DURATION) {
+    console.log(`Using cached collections (${cachedCollections.length} collections)`);
+    return cachedCollections;
+  }
+
+  const collections: TokenCollection[] = [];
+  
+  try {
+    // Get local collections
+    if (hasGetLocalVariableCollections) {
+      const localCollections = await figma.variables.getLocalVariableCollectionsAsync();
+      localCollections.forEach(collection => {
+        collections.push({
+          id: collection.id,
+          name: collection.name,
+          isLocal: true
+        });
+      });
+      console.log(`Found ${localCollections.length} local collections`);
+    }
+
+    // Get library collections
+    if (hasTeamLibraryAPI) {
+      const libraryCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+      libraryCollections.forEach(collection => {
+        collections.push({
+          id: collection.key, // Note: library collections use 'key' not 'id'
+          name: collection.name,
+          isLocal: false
+        });
+      });
+      console.log(`Found ${libraryCollections.length} library collections`);
+    }
+
+    cachedCollections = collections;
+    collectionsTimestamp = now;
+    
+    console.log(`Total collections cached: ${collections.length}`);
+    return collections;
+  } catch (error) {
+    console.error("Error fetching collections:", error);
+    return [];
+  }
 }

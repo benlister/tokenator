@@ -100,6 +100,34 @@
     width: 100%;
     max-width: 300px;
   }
+  /* Custom styling for the details element */
+  details summary::-webkit-details-marker {
+    display: none;
+  }
+
+  details[open] summary span:last-child {
+    transform: rotate(180deg);
+    transition: transform 0.2s ease;
+  }
+
+  details summary span:last-child {
+    transition: transform 0.2s ease;
+  }
+
+  details[open] .collection-filters {
+    animation: slideDown 0.2s ease;
+  }
+
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      max-height: 0;
+    }
+    to {
+      opacity: 1;
+      max-height: 200px;
+    }
+  }
 </style>
 <img
   class="logo"
@@ -109,26 +137,101 @@
 <div class="section">
   <h3>Tokenate your components</h3>
   <p>
-    Find manual spacing and border radius values and auto-replace them with your
+    Find static spacing and border radius values and auto-replace them with
     design tokens. Run it on a single component or the entire page.
   </p>
+
+  <!-- Collapsible Advanced Options -->
+  <details style="margin-bottom: 12px">
+    <summary
+      style="
+        cursor: pointer;
+        font-size: 11px;
+        margin-bottom: 8px;
+        list-style: none;
+        display: flex;
+        align-items: center;
+      "
+    >
+      <span style="margin-right: 4px"></span>
+      Advanced Options
+      <span style="margin-left: auto; font-size: 10px">▼</span>
+    </summary>
+
+    <div
+      class="collection-filters"
+      style="
+        margin-top: 8px;
+        padding: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+      "
+    >
+      <div class="filter-group" style="margin-bottom: 8px">
+        <label
+          for="spacing-collection"
+          style="
+            display: block;
+            font-size: 10px;
+            color: #999;
+            margin-bottom: 4px;
+          "
+          >Spacing token source:</label
+        >
+        <select
+          id="spacing-collection"
+          style="
+            width: 100%;
+            padding: 3px 6px;
+            font-size: 10px;
+            background: #2c2c2c;
+            border: 1px solid #444;
+            color: white;
+            border-radius: 2px;
+          "
+        >
+          <option value="">All Libraries</option>
+        </select>
+      </div>
+
+      <div class="filter-group">
+        <label
+          for="border-radius-collection"
+          style="
+            display: block;
+            font-size: 10px;
+            color: #999;
+            margin-bottom: 4px;
+          "
+          >Border radius token source:</label
+        >
+        <select
+          id="border-radius-collection"
+          style="
+            width: 100%;
+            padding: 3px 6px;
+            font-size: 10px;
+            background: #2c2c2c;
+            border: 1px solid #444;
+            color: white;
+            border-radius: 2px;
+          "
+        >
+          <option value="">All Libraries</option>
+        </select>
+      </div>
+    </div>
+  </details>
+
   <button id="find-all-issues" class="secondary">Find All Issues</button>
   <button id="clear-markers" class="tertiary">Clear All Markers</button>
 </div>
 
-<!-- Main action buttons including the new border radius button -->
+<!-- Main action buttons -->
 <div class="actions">
   <button id="fix-spacing" class="primary">Auto-Fix Spacing</button>
   <button id="fix-border-radius" class="primary">Auto-Fix Border Radius</button>
 </div>
-
-<!-- Hidden for now
-<div class="section">
-  <h3>Color Tokens</h3>
-  <button id="find-colors" class="primary">Find Color Issues</button>
-  <button id="fix-colors" class="secondary">Auto-Fix Colors</button>
-</div>
--->
 
 <div id="results" style="display: none"></div>
 <div class="actions" style="margin-top: 20px">
@@ -141,27 +244,136 @@
   </button>
 </div>
 <script>
+  // State management
+  let availableCollections = [];
+  let selectedSpacingCollection = "";
+  let selectedBorderRadiusCollection = "";
+
+  // Load collections on startup
+  window.onload = () => {
+    parent.postMessage({ pluginMessage: { type: "get-collections" } }, "*");
+  };
+
+  function populateCollectionDropdowns(collections) {
+    const spacingSelect = document.getElementById("spacing-collection");
+    const borderRadiusSelect = document.getElementById(
+      "border-radius-collection"
+    );
+
+    // Clear existing options (except "All Libraries")
+    spacingSelect.innerHTML = '<option value="">All Libraries</option>';
+    borderRadiusSelect.innerHTML = '<option value="">All Libraries</option>';
+
+    // Add collections to both dropdowns
+    collections.forEach((collection) => {
+      const spacingOption = new Option(
+        `${collection.name} ${collection.isLocal ? "(Local)" : "(Library)"}`,
+        collection.id
+      );
+      const borderRadiusOption = new Option(
+        `${collection.name} ${collection.isLocal ? "(Local)" : "(Library)"}`,
+        collection.id
+      );
+
+      spacingSelect.add(spacingOption);
+      borderRadiusSelect.add(borderRadiusOption);
+    });
+  }
+
+  // Event listeners for collection selection
+  document.getElementById("spacing-collection").onchange = (e) => {
+    selectedSpacingCollection = e.target.value;
+  };
+
+  document.getElementById("border-radius-collection").onchange = (e) => {
+    selectedBorderRadiusCollection = e.target.value;
+  };
+
   document.getElementById("find-all-issues").onclick = () => {
     const results = document.getElementById("results");
-    results.innerHTML =
-      "Searching your components for <s>John Connor</s> untokenized values...";
+
+    // Show which collections are being used if advanced options are expanded
+    const detailsElement = document.querySelector("details");
+    if (
+      detailsElement.open &&
+      (selectedSpacingCollection || selectedBorderRadiusCollection)
+    ) {
+      const spacingText = selectedSpacingCollection
+        ? availableCollections.find((c) => c.id === selectedSpacingCollection)
+            ?.name || "Selected Collection"
+        : "All Libraries";
+      const borderRadiusText = selectedBorderRadiusCollection
+        ? availableCollections.find(
+            (c) => c.id === selectedBorderRadiusCollection
+          )?.name || "Selected Collection"
+        : "All Libraries";
+
+      results.innerHTML = `Searching components...<br><small>Spacing: ${spacingText}<br>Border Radius: ${borderRadiusText}</small>`;
+    } else {
+      results.innerHTML =
+        "Searching your components for <s>John Connor</s> untokenized values...";
+    }
     results.style.display = "block";
-    parent.postMessage({ pluginMessage: { type: "find-all-issues" } }, "*");
+
+    parent.postMessage(
+      {
+        pluginMessage: {
+          type: "find-all-issues",
+          spacingCollectionId: selectedSpacingCollection || null,
+          borderRadiusCollectionId: selectedBorderRadiusCollection || null,
+        },
+      },
+      "*"
+    );
   };
 
   document.getElementById("fix-spacing").onclick = () => {
     const results = document.getElementById("results");
-    results.innerHTML = "Tokenating your spacing...";
+    const collectionName = selectedSpacingCollection
+      ? availableCollections.find((c) => c.id === selectedSpacingCollection)
+          ?.name || "Selected Collection"
+      : "All Libraries";
+
+    results.innerHTML = `Tokenating spacing...${
+      selectedSpacingCollection
+        ? `<br><small>Using: ${collectionName}</small>`
+        : ""
+    }`;
     results.style.display = "block";
-    parent.postMessage({ pluginMessage: { type: "fix-spacing-issues" } }, "*");
+
+    parent.postMessage(
+      {
+        pluginMessage: {
+          type: "fix-spacing-issues",
+          spacingCollectionId: selectedSpacingCollection || null,
+        },
+      },
+      "*"
+    );
   };
 
   document.getElementById("fix-border-radius").onclick = () => {
     const results = document.getElementById("results");
-    results.innerHTML = "Tokenating your border radius...";
+    const collectionName = selectedBorderRadiusCollection
+      ? availableCollections.find(
+          (c) => c.id === selectedBorderRadiusCollection
+        )?.name || "Selected Collection"
+      : "All Libraries";
+
+    results.innerHTML = `Tokenating border radius...${
+      selectedBorderRadiusCollection
+        ? `<br><small>Using: ${collectionName}</small>`
+        : ""
+    }`;
     results.style.display = "block";
+
     parent.postMessage(
-      { pluginMessage: { type: "fix-border-radius-issues" } },
+      {
+        pluginMessage: {
+          type: "fix-border-radius-issues",
+          borderRadiusCollectionId: selectedBorderRadiusCollection || null,
+        },
+      },
       "*"
     );
   };
@@ -173,7 +385,6 @@
     parent.postMessage({ pluginMessage: { type: "clear-markers" } }, "*");
   };
 
-  // Updated handler for the revert button (now handles both types)
   document.getElementById("revert-all").onclick = () => {
     if (
       confirm(
@@ -190,36 +401,27 @@
     }
   };
 
-  // COMMENT OUT THESE FUNCTIONS SINCE THE BUTTONS DON'T EXIST
-  /*
-  document.getElementById("find-colors").onclick = () => {
-    const results = document.getElementById("results");
-    results.innerHTML = "Searching for color issues...";
-    results.style.display = "block";
-    parent.postMessage({ pluginMessage: { type: "find-color-issues" } }, "*");
-  };
-
-  document.getElementById("fix-colors").onclick = () => {
-    const results = document.getElementById("results");
-    results.innerHTML = "Fixing color issues...";
-    results.style.display = "block";
-    parent.postMessage({ pluginMessage: { type: "fix-color-issues" } }, "*");
-  };
-  */
-
   onmessage = (event) => {
     const message = event.data.pluginMessage;
     const results = document.getElementById("results");
 
     if (message.type === "error") {
       results.innerHTML = `Error: ${message.message}`;
-      results.style.color = "#F24822"; // Red color for errors
-      results.style.display = "block"; // Make sure it's visible
-      return; // Exit early if it's an error
+      results.style.color = "#F24822";
+      results.style.display = "block";
+      return;
     }
 
     // Reset text color for non-error messages
     results.style.color = "";
+
+    // Handle collections loaded
+    if (message.type === "collections-loaded") {
+      availableCollections = message.collections;
+      populateCollectionDropdowns(message.collections);
+      console.log(`Loaded ${message.collections.length} collections`);
+      return;
+    }
 
     // Process different message types
     if (message.type === "all-issues-found") {
@@ -248,41 +450,6 @@
         results.style.display = "block";
       } else {
         results.innerHTML = "No tokenization issues found";
-        // Set a timeout to hide the results after 3 seconds for "no issues" messages
-        setTimeout(() => {
-          results.style.display = "none";
-        }, 3000);
-      }
-    }
-
-    if (message.type === "spacing-issues-found") {
-      if (message.count > 0) {
-        const fixableText =
-          message.fixableCount > 0
-            ? `<span class="token fixable" title="Matching token(s) found. Tokenate them!">${message.fixableCount} fixable</span>`
-            : "";
-        const unfixableText =
-          message.unfixableCount > 0
-            ? `<span class="token notfixable" title="No matching token(s) found">${message.unfixableCount} unfixable</span>`
-            : "";
-        const connector = fixableText && unfixableText ? ", " : "";
-
-        results.innerHTML = `Found ${message.count} spacing issues in ${message.nodeCount} nodes<br>${fixableText}${connector}${unfixableText}`;
-        results.style.display = "block";
-      } else {
-        results.innerHTML = "No spacing issues found";
-        setTimeout(() => {
-          results.style.display = "none";
-        }, 3000);
-      }
-    }
-
-    if (message.type === "color-issues-found") {
-      if (message.count > 0) {
-        results.innerHTML = `Found ${message.count} color issues`;
-        results.style.display = "block";
-      } else {
-        results.innerHTML = "No color issues found";
         setTimeout(() => {
           results.style.display = "none";
         }, 3000);
@@ -335,7 +502,7 @@
       }
     }
 
-    // Handler for the new revert operation (both types)
+    // Handler for the revert operation (both types)
     if (message.type === "all-bindings-reverted") {
       if (message.totalCount > 0) {
         const spacingText =
@@ -358,28 +525,6 @@
       }, 5000);
     }
 
-    // Handler for the old spacing-only revert operation
-    if (message.type === "spacing-bindings-reverted") {
-      if (message.count > 0) {
-        results.innerHTML = `Converted ${message.count} spacing token bindings to static values`;
-      } else {
-        results.innerHTML = "No spacing token bindings found to convert";
-      }
-      results.style.display = "block";
-      setTimeout(() => {
-        results.style.display = "none";
-      }, 5000);
-    }
-
-    if (message.type === "color-issues-fixed") {
-      results.innerHTML = `Fixed ${message.count} color issues`;
-      if (message.count === 0) {
-        setTimeout(() => {
-          results.style.display = "none";
-        }, 3000);
-      }
-    }
-
     if (message.type === "markers-cleared") {
       results.innerHTML = "All markers cleared";
       setTimeout(() => {
@@ -389,7 +534,6 @@
 
     // Add API check message handling
     if (message.type === "api-check") {
-      // Don't show anything for API checks
       results.style.display = "none";
     }
   };
