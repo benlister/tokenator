@@ -1,5 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
+
 figma.showUI(__html__, { width: 300, height: 585 });
 
 // API Availability
@@ -8,6 +9,10 @@ const hasGetLocalVariables = Boolean(hasVariablesAPI && figma.variables.getLocal
 const hasGetLocalVariableCollections = Boolean(hasVariablesAPI && figma.variables.getLocalVariableCollectionsAsync);
 const hasTeamLibraryAPI = Boolean(figma.teamLibrary && figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync && figma.teamLibrary.getVariablesInLibraryCollectionAsync);
 const hasImportVariableByKey = Boolean(hasVariablesAPI && figma.variables.importVariableByKeyAsync);
+
+let cachedSpacingTokens: SpacingToken[] | null = null;
+let cacheTimestamp: number = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
 
 console.log("API availability check:");
@@ -50,6 +55,7 @@ type IndividualSpacingBindableNodeField =
 type CheckableBindableNodeField = IndividualSpacingBindableNodeField;
 
 
+// Replace your getAllVariablesAndImportLibraries function with this version
 async function getAllVariablesAndImportLibraries(): Promise<Variable[]> {
   if (!hasVariablesAPI || !hasImportVariableByKey) {
     console.warn("Variables API or importVariableByKeyAsync not available. Cannot fetch all variables.");
@@ -58,13 +64,19 @@ async function getAllVariablesAndImportLibraries(): Promise<Variable[]> {
 
   const allVariables: Variable[] = [];
   const processedVariableKeys = new Set<string>();
+  
+  console.log("Starting optimized variable collection...");
+  const startTime = Date.now();
 
-  // 1. Get Local Variables
+  // 1. Get Local Variables (usually fast)
   if (hasGetLocalVariables) {
     try {
       console.log("Fetching local variables...");
+      const localStart = Date.now();
       const localVariables = await figma.variables.getLocalVariablesAsync();
-      console.log(`Found ${localVariables.length} local variables.`);
+      const localEnd = Date.now();
+      console.log(`Found ${localVariables.length} local variables in ${(localEnd - localStart)}ms`);
+      
       localVariables.forEach(v => {
         if (!processedVariableKeys.has(v.key)) {
           allVariables.push(v);
@@ -76,37 +88,87 @@ async function getAllVariablesAndImportLibraries(): Promise<Variable[]> {
     }
   }
 
-  // 2. Get Variables from Enabled Libraries
+  // 2. Get Variables from Enabled Libraries (potentially slow - optimize this part)
   if (hasTeamLibraryAPI) {
     try {
-      console.log("Fetching variables from enabled libraries...");
+      console.log("Fetching library collections...");
+      const libStart = Date.now();
       const libraryCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
-      console.log(`Found ${libraryCollections.length} available library variable collections.`);
+      const libCollectionEnd = Date.now();
+      console.log(`Found ${libraryCollections.length} library collections in ${(libCollectionEnd - libStart)}ms`);
 
+      // Process collections in batches to avoid overwhelming the API
+      const BATCH_SIZE = 5; // Process 5 variables at a time
+      
       for (const libCollection of libraryCollections) {
-        const libraryVariablesInCollection = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libCollection.key);
-        for (const libVarStub of libraryVariablesInCollection) {
-          if (!processedVariableKeys.has(libVarStub.key)) {
-            try {
-              const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
-              allVariables.push(importedVariable);
-              processedVariableKeys.add(importedVariable.key);
-            } catch (importError) {
-              console.error(`Error importing library variable '${libVarStub.name}' (key: ${libVarStub.key}):`, importError);
+        try {
+          const collectionStart = Date.now();
+          const libraryVariablesInCollection = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libCollection.key);
+          
+          // Filter to only spacing-related variables by name before importing
+          const spacingVariables = libraryVariablesInCollection.filter(libVar => 
+            /space|spacing|gap|padding|margin|size|grid/i.test(libVar.name)
+          );
+          
+          console.log(`Collection "${libCollection.name}": ${libraryVariablesInCollection.length} total, ${spacingVariables.length} spacing-related`);
+          
+          // Process in batches
+          for (let i = 0; i < spacingVariables.length; i += BATCH_SIZE) {
+            const batch = spacingVariables.slice(i, i + BATCH_SIZE);
+            const batchPromises = batch.map(async (libVarStub) => {
+              if (!processedVariableKeys.has(libVarStub.key)) {
+                try {
+                  const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+                  return importedVariable;
+                } catch (importError) {
+                  console.error(`Error importing library variable '${libVarStub.name}' (key: ${libVarStub.key}):`, importError);
+                  return null;
+                }
+              }
+              return null;
+            });
+            
+            const batchResults = await Promise.all(batchPromises);
+            batchResults.forEach(variable => {
+              if (variable && !processedVariableKeys.has(variable.key)) {
+                allVariables.push(variable);
+                processedVariableKeys.add(variable.key);
+              }
+            });
+            
+            // Small delay between batches to prevent API rate limiting
+            if (i + BATCH_SIZE < spacingVariables.length) {
+              await new Promise(resolve => setTimeout(resolve, 50));
             }
           }
+          
+          const collectionEnd = Date.now();
+          console.log(`Processed collection "${libCollection.name}" in ${(collectionEnd - collectionStart)}ms`);
+          
+        } catch (collectionError) {
+          console.error(`Error processing collection "${libCollection.name}":`, collectionError);
         }
       }
     } catch (error) {
       console.error("Error getting library variables:", error);
     }
   }
+  
+  const endTime = Date.now();
+  console.log(`Total variable collection completed in ${(endTime - startTime)}ms`);
   console.log(`Total unique variables processed (local + imported library): ${allVariables.length}`);
   return allVariables;
 }
+async function getSpacingVariables(forceRefresh: boolean = false): Promise<SpacingToken[]> {
+  const now = Date.now();
+  
+  // Return cached results if they're still valid
+  if (!forceRefresh && cachedSpacingTokens && (now - cacheTimestamp) < CACHE_DURATION) {
+    console.log(`Using cached spacing tokens (${cachedSpacingTokens.length} tokens)`);
+    return cachedSpacingTokens;
+  }
 
-async function getSpacingVariables(): Promise<SpacingToken[]> {
-  console.log("Getting all variables (local and imported library)...");
+  console.log("Fetching fresh spacing variables...");
   const allResolvedVariables = await getAllVariablesAndImportLibraries();
   console.log(`Processing ${allResolvedVariables.length} variables for spacing tokens.`);
 
@@ -129,20 +191,21 @@ async function getSpacingVariables(): Promise<SpacingToken[]> {
       const isSpacingName = /space|spacing|gap|padding|margin|size|grid/i.test(variableName);
       if (isSpacingName) {
         spacingTokens.push({
-          id: variable.id, // The ID of the Variable object
+          id: variable.id,
           key: variable.key,
           name: variableName,
           value: variableValue,
-          variableObject: variable, // Store the entire Variable object
+          variableObject: variable,
         });
       }
     }
   }
 
-  console.log(`Total spacing tokens found: ${spacingTokens.length}`);
-  spacingTokens.forEach(token => {
-    console.log(`- Spacing Token: ${token.name}: ${token.value}px (ID: ${token.id}, Key: ${token.key})`);
-  });
+  // Cache the results
+  cachedSpacingTokens = spacingTokens;
+  cacheTimestamp = now;
+
+  console.log(`Total spacing tokens found and cached: ${spacingTokens.length}`);
   return spacingTokens;
 }
 
@@ -159,8 +222,14 @@ function isAutoLayoutNode(node: SceneNode): node is AutoLayoutNode {
 }
 
 async function findSpacingIssues(): Promise<SpacingIssue[]> {
-  const spacingTokens = await getSpacingVariables();
+  const spacingTokens = await getSpacingVariables(); // Uses cache by default
   const issues: SpacingIssue[] = [];
+  
+  // Pre-create a Map for faster token lookup by value
+  const tokensByValue = new Map<number, SpacingToken>();
+  spacingTokens.forEach(token => {
+    tokensByValue.set(token.value, token);
+  });
 
   function isIndividualPaddingBound(node: AutoLayoutNode, propertyName: CheckableBindableNodeField): boolean {
     try {
@@ -179,28 +248,28 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
     return isIndividualPaddingBound(node, 'paddingTop') && isIndividualPaddingBound(node, 'paddingBottom');
   }
 
+  // Optimized token lookup using Map
   function findMatchingTokenByValue(value: number): SpacingToken | null {
-    if (spacingTokens.length === 0) return null;
-    // Find the token that has the exact value
-    return spacingTokens.find(token => token.value === value) || null;
+    return tokensByValue.get(value) || null;
   }
 
   function checkNode(node: SceneNode) {
     if (isAutoLayoutNode(node)) {
       if (node.layoutMode !== "NONE") {
+        // Check itemSpacing
         if (node.itemSpacing !== undefined && node.itemSpacing > 0 && !isIndividualPaddingBound(node, 'itemSpacing')) {
           const token = findMatchingTokenByValue(node.itemSpacing);
           issues.push({
             node: node,
             property: "itemSpacing",
             currentValue: node.itemSpacing,
-            matchingToken: token, // Store the full token
+            matchingToken: token,
             message: token ? `Map to ${token.name} (${token.value}px)` : `No exact token for ${node.itemSpacing}px gap.`,
           });
-          // Add marker with appropriate color based on whether token exists
           addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
         }
 
+        // Check padding (existing logic remains the same)
         const { paddingTop, paddingBottom, paddingLeft, paddingRight } = node;
         const allPaddingsSameAndPositive = paddingTop > 0 && paddingTop === paddingBottom && paddingTop === paddingLeft && paddingTop === paddingRight;
 
@@ -214,32 +283,39 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
           issues.push({ node, property: "paddingAll", currentValue: paddingTop, matchingToken: token, message: token ? `Map all padding to ${token.name}`: `No token for ${paddingTop}px uniform padding.`});
           addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
         } else {
+          // Handle horizontal padding
           if (paddingLeft > 0 && paddingLeft === paddingRight && !allPaddingsSameAndPositive && !isHorizontalPaddingBound(node)) {
             const token = findMatchingTokenByValue(paddingLeft);
             issues.push({ node, property: "horizontalPadding", currentValue: paddingLeft, matchingToken: token, message: token ? `Map horiz. padding to ${token.name}`: `No token for ${paddingLeft}px horiz. padding.`});
             addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
           } else {
+            // Individual left padding
             if (paddingLeft > 0 && !isIndividualPaddingBound(node, 'paddingLeft') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
               const token = findMatchingTokenByValue(paddingLeft);
               issues.push({ node, property: "paddingLeft", currentValue: paddingLeft, matchingToken: token, message: token ? `Map left padding to ${token.name}`: `No token for ${paddingLeft}px left padding.`});
               addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
             }
+            // Individual right padding
             if (paddingRight > 0 && !isIndividualPaddingBound(node, 'paddingRight') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
               const token = findMatchingTokenByValue(paddingRight);
               issues.push({ node, property: "paddingRight", currentValue: paddingRight, matchingToken: token, message: token ? `Map right padding to ${token.name}`: `No token for ${paddingRight}px right padding.`});
               addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
             }
           }
+          
+          // Handle vertical padding
           if (paddingTop > 0 && paddingTop === paddingBottom && !allPaddingsSameAndPositive && !isVerticalPaddingBound(node)) {
             const token = findMatchingTokenByValue(paddingTop);
             issues.push({ node, property: "verticalPadding", currentValue: paddingTop, matchingToken: token, message: token ? `Map vert. padding to ${token.name}`: `No token for ${paddingTop}px vert. padding.`});
             addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
           } else {
+            // Individual top padding
             if (paddingTop > 0 && !isIndividualPaddingBound(node, 'paddingTop') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
               const token = findMatchingTokenByValue(paddingTop);
               issues.push({ node, property: "paddingTop", currentValue: paddingTop, matchingToken: token, message: token ? `Map top padding to ${token.name}`: `No token for ${paddingTop}px top padding.`});
               addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
             }
+            // Individual bottom padding
             if (paddingBottom > 0 && !isIndividualPaddingBound(node, 'paddingBottom') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
               const token = findMatchingTokenByValue(paddingBottom);
               issues.push({ node, property: "paddingBottom", currentValue: paddingBottom, matchingToken: token, message: token ? `Map bottom padding to ${token.name}`: `No token for ${paddingBottom}px bottom padding.`});
@@ -250,6 +326,7 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
       }
     }
 
+    // Recursively check children
     if ("children" in node) {
       for (const child of node.children) {
         checkNode(child);
@@ -257,7 +334,12 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
     }
   }
 
-  const nodesToCheck = figma.currentPage.selection.length > 0 ? figma.currentPage.selection : figma.currentPage.children;
+  // Smart scoping: prioritize selection, but don't process entire page unnecessarily
+  const selection = figma.currentPage.selection;
+  const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
+  
+  console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for spacing issues...`);
+  
   for (const node of nodesToCheck) {
     checkNode(node);
   }
@@ -265,7 +347,6 @@ async function findSpacingIssues(): Promise<SpacingIssue[]> {
   console.log(`Found ${issues.length} potential spacing issues.`);
   return issues;
 }
-
 
 // Updated function to add color-coded markers based on whether the issue can be fixed
 function addMarkerToNode(node: SceneNode, name: string, canFix: boolean) {
@@ -480,6 +561,7 @@ async function revertSpacingBindingsToStatic(): Promise<number> {
 }
 
 // Update to the message handler in the main code
+// Add this to your message handler - replace the existing figma.ui.onmessage
 figma.ui.onmessage = async (msg) => {
   console.log("Received message from UI:", msg.type);
   try {
@@ -524,21 +606,28 @@ figma.ui.onmessage = async (msg) => {
         count: clearedCount
       });
       if (clearedCount > 0) figma.notify(`Cleared ${clearedCount} markers.`);
+    } else if (msg.type === 'revert-spacing-bindings') {
+      const revertedCount = await revertSpacingBindingsToStatic();
+      
+      figma.ui.postMessage({
+        type: 'spacing-bindings-reverted',
+        count: revertedCount
+      });
+      
+      if (revertedCount > 0) {
+        figma.notify(`Converted ${revertedCount} token bindings back to static values.`);
+      } else {
+        figma.notify(`No spacing token bindings found to revert.`);
+      }
+    } else if (msg.type === 'refresh-variables') {
+      // Add this new message type to force refresh variables cache
+      console.log("Force refreshing variables cache...");
+      await getSpacingVariables(true); // Force refresh
+      figma.notify("Variables cache refreshed");
+      figma.ui.postMessage({
+        type: 'variables-refreshed'
+      });
     }
-    else if (msg.type === 'revert-spacing-bindings') {
-  const revertedCount = await revertSpacingBindingsToStatic();
-  
-  figma.ui.postMessage({
-    type: 'spacing-bindings-reverted',
-    count: revertedCount
-  });
-  
-  if (revertedCount > 0) {
-    figma.notify(`Converted ${revertedCount} token bindings back to static values.`);
-  } else {
-    figma.notify(`No spacing token bindings found to revert.`);
-  }
-}
   } catch (error: unknown) {
     let message = 'Unknown error';
     if (error instanceof Error) {
