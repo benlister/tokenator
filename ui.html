@@ -109,16 +109,17 @@
 <div class="section">
   <h3>Tokenate your components</h3>
   <p>
-    Find manual spacing values and auto-replace them with your spacing tokens.
-    Run it on a single component or the entire page.
+    Find manual spacing and border radius values and auto-replace them with your
+    design tokens. Run it on a single component or the entire page.
   </p>
-  <button id="find-spacing" class="secondary">Find Spacing Issues</button>
+  <button id="find-all-issues" class="secondary">Find All Issues</button>
   <button id="clear-markers" class="tertiary">Clear All Markers</button>
 </div>
 
-<!-- Main action buttons including the new undo button -->
+<!-- Main action buttons including the new border radius button -->
 <div class="actions">
   <button id="fix-spacing" class="primary">Auto-Fix Spacing</button>
+  <button id="fix-border-radius" class="primary">Auto-Fix Border Radius</button>
 </div>
 
 <!-- Hidden for now
@@ -132,7 +133,7 @@
 <div id="results" style="display: none"></div>
 <div class="actions" style="margin-top: 20px">
   <button
-    id="revert-spacing"
+    id="revert-all"
     class="destructive"
     title="Convert token bindings back to static values"
   >
@@ -140,12 +141,12 @@
   </button>
 </div>
 <script>
-  document.getElementById("find-spacing").onclick = () => {
+  document.getElementById("find-all-issues").onclick = () => {
     const results = document.getElementById("results");
     results.innerHTML =
-      "Searching your components for <s>John Connor</s> untokenized spacing...";
+      "Searching your components for <s>John Connor</s> untokenized values...";
     results.style.display = "block";
-    parent.postMessage({ pluginMessage: { type: "find-spacing-issues" } }, "*");
+    parent.postMessage({ pluginMessage: { type: "find-all-issues" } }, "*");
   };
 
   document.getElementById("fix-spacing").onclick = () => {
@@ -155,6 +156,16 @@
     parent.postMessage({ pluginMessage: { type: "fix-spacing-issues" } }, "*");
   };
 
+  document.getElementById("fix-border-radius").onclick = () => {
+    const results = document.getElementById("results");
+    results.innerHTML = "Tokenating your border radius...";
+    results.style.display = "block";
+    parent.postMessage(
+      { pluginMessage: { type: "fix-border-radius-issues" } },
+      "*"
+    );
+  };
+
   document.getElementById("clear-markers").onclick = () => {
     const results = document.getElementById("results");
     results.innerHTML = "Clearing markers...";
@@ -162,18 +173,18 @@
     parent.postMessage({ pluginMessage: { type: "clear-markers" } }, "*");
   };
 
-  // New handler for the revert button
-  document.getElementById("revert-spacing").onclick = () => {
+  // Updated handler for the revert button (now handles both types)
+  document.getElementById("revert-all").onclick = () => {
     if (
       confirm(
-        "This will convert all token-bound spacing to static pixel values. This action can't be undone with the plugin. Continue?"
+        "This will convert all token-bound spacing AND border radius to static pixel values. This action can't be undone with the plugin. Continue?"
       )
     ) {
       const results = document.getElementById("results");
       results.innerHTML = "Converting tokens to static values...";
       results.style.display = "block";
       parent.postMessage(
-        { pluginMessage: { type: "revert-spacing-bindings" } },
+        { pluginMessage: { type: "revert-all-bindings" } },
         "*"
       );
     }
@@ -211,6 +222,39 @@
     results.style.color = "";
 
     // Process different message types
+    if (message.type === "all-issues-found") {
+      if (message.totalCount > 0) {
+        const spacingText =
+          message.spacingCount > 0 ? `${message.spacingCount} spacing` : "";
+        const borderRadiusText =
+          message.borderRadiusCount > 0
+            ? `${message.borderRadiusCount} border radius`
+            : "";
+        const issueTypes = [spacingText, borderRadiusText]
+          .filter((text) => text)
+          .join(" and ");
+
+        const fixableText =
+          message.fixableCount > 0
+            ? `<span class="token fixable" title="Matching token(s) found. Tokenate them!">${message.fixableCount} fixable</span>`
+            : "";
+        const unfixableText =
+          message.unfixableCount > 0
+            ? `<span class="token notfixable" title="No matching token(s) found">${message.unfixableCount} unfixable</span>`
+            : "";
+        const connector = fixableText && unfixableText ? ", " : "";
+
+        results.innerHTML = `Found ${message.totalCount} issues (${issueTypes}) in ${message.nodeCount} nodes<br>${fixableText}${connector}${unfixableText}`;
+        results.style.display = "block";
+      } else {
+        results.innerHTML = "No tokenization issues found";
+        // Set a timeout to hide the results after 3 seconds for "no issues" messages
+        setTimeout(() => {
+          results.style.display = "none";
+        }, 3000);
+      }
+    }
+
     if (message.type === "spacing-issues-found") {
       if (message.count > 0) {
         const fixableText =
@@ -227,7 +271,6 @@
         results.style.display = "block";
       } else {
         results.innerHTML = "No spacing issues found";
-        // Set a timeout to hide the results after 3 seconds for "no issues" messages
         setTimeout(() => {
           results.style.display = "none";
         }, 3000);
@@ -256,7 +299,7 @@
 
         if (message.unfixableCount > 0) {
           if (resultText) resultText += "<br>";
-          resultText += `<span>${message.unfixableCount} issues need manual changes</span>`;
+          resultText += `<span>${message.unfixableCount} spacing issues need manual changes</span>`;
         }
 
         results.innerHTML = resultText;
@@ -269,12 +312,58 @@
       }
     }
 
-    // Handler for the new revert operation
-    if (message.type === "spacing-bindings-reverted") {
-      if (message.count > 0) {
-        results.innerHTML = `Converted ${message.count} token bindings to static values`;
+    if (message.type === "border-radius-issues-fixed") {
+      if (message.fixedCount > 0 || message.unfixableCount > 0) {
+        let resultText = "";
+
+        if (message.fixedCount > 0) {
+          resultText += `<span>Fixed ${message.fixedCount} border radius issues</span>`;
+        }
+
+        if (message.unfixableCount > 0) {
+          if (resultText) resultText += "<br>";
+          resultText += `<span>${message.unfixableCount} border radius issues need manual changes</span>`;
+        }
+
+        results.innerHTML = resultText;
+        results.style.display = "block";
+      } else {
+        results.innerHTML = "No border radius issues to fix";
+        setTimeout(() => {
+          results.style.display = "none";
+        }, 5000);
+      }
+    }
+
+    // Handler for the new revert operation (both types)
+    if (message.type === "all-bindings-reverted") {
+      if (message.totalCount > 0) {
+        const spacingText =
+          message.spacingCount > 0 ? `${message.spacingCount} spacing` : "";
+        const borderRadiusText =
+          message.borderRadiusCount > 0
+            ? `${message.borderRadiusCount} border radius`
+            : "";
+        const revertedTypes = [spacingText, borderRadiusText]
+          .filter((text) => text)
+          .join(" and ");
+
+        results.innerHTML = `Converted ${message.totalCount} token bindings (${revertedTypes}) to static values`;
       } else {
         results.innerHTML = "No token bindings found to convert";
+      }
+      results.style.display = "block";
+      setTimeout(() => {
+        results.style.display = "none";
+      }, 5000);
+    }
+
+    // Handler for the old spacing-only revert operation
+    if (message.type === "spacing-bindings-reverted") {
+      if (message.count > 0) {
+        results.innerHTML = `Converted ${message.count} spacing token bindings to static values`;
+      } else {
+        results.innerHTML = "No spacing token bindings found to convert";
       }
       results.style.display = "block";
       setTimeout(() => {

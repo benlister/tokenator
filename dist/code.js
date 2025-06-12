@@ -18,6 +18,64 @@ const hasImportVariableByKey = Boolean(hasVariablesAPI && figma.variables.import
 let cachedSpacingTokens = null;
 let cacheTimestamp = 0;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+let cachedBorderRadiusTokens = null;
+let borderRadiusCacheTimestamp = 0;
+function getBorderRadiusVariables() {
+    return __awaiter(this, arguments, void 0, function* (forceRefresh = false) {
+        const now = Date.now();
+        // Return cached results if they're still valid
+        if (!forceRefresh && cachedBorderRadiusTokens && (now - borderRadiusCacheTimestamp) < CACHE_DURATION) {
+            console.log(`Using cached border radius tokens (${cachedBorderRadiusTokens.length} tokens)`);
+            return cachedBorderRadiusTokens;
+        }
+        console.log("Fetching fresh border radius variables...");
+        const allResolvedVariables = yield getAllVariablesAndImportLibraries();
+        console.log(`Processing ${allResolvedVariables.length} variables for border radius tokens.`);
+        const borderRadiusTokens = [];
+        for (const variable of allResolvedVariables) {
+            if (variable.resolvedType !== 'FLOAT') {
+                continue;
+            }
+            const variableName = variable.name;
+            const modeIds = Object.keys(variable.valuesByMode);
+            if (modeIds.length === 0) {
+                continue;
+            }
+            const firstModeId = modeIds[0];
+            const variableValue = variable.valuesByMode[firstModeId];
+            if (typeof variableValue === 'number' && variableValue >= 0) {
+                // Look for border radius related names
+                const isBorderRadiusName = /radius|corner|rounded|border.*radius|br-/i.test(variableName);
+                if (isBorderRadiusName) {
+                    borderRadiusTokens.push({
+                        id: variable.id,
+                        key: variable.key,
+                        name: variableName,
+                        value: variableValue,
+                        variableObject: variable,
+                    });
+                }
+            }
+        }
+        // Cache the results
+        cachedBorderRadiusTokens = borderRadiusTokens;
+        borderRadiusCacheTimestamp = now;
+        console.log(`Total border radius tokens found and cached: ${borderRadiusTokens.length}`);
+        return borderRadiusTokens;
+    });
+}
+function isBorderRadiusNode(node) {
+    return node.type === "FRAME" ||
+        node.type === "COMPONENT" ||
+        node.type === "INSTANCE" ||
+        node.type === "RECTANGLE";
+}
+function hasRadiusProperties(node) {
+    return 'topLeftRadius' in node &&
+        'topRightRadius' in node &&
+        'bottomLeftRadius' in node &&
+        'bottomRightRadius' in node;
+}
 console.log("API availability check:");
 console.log("- Variables API:", hasVariablesAPI);
 console.log("- getLocalVariablesAsync:", hasGetLocalVariables);
@@ -290,24 +348,41 @@ function findSpacingIssues() {
     });
 }
 // Updated function to add color-coded markers based on whether the issue can be fixed
-function addMarkerToNode(node, name, canFix) {
+// Updated function to add different markers based on issue type
+function addMarkerToNode(node, name, canFix, issueType = 'spacing') {
     try {
         // Remove any existing markers for this node first
-        const existingMarkers = figma.currentPage.findAll(n => n.type === "ELLIPSE" &&
+        const existingMarkers = figma.currentPage.findAll(n => (n.type === "ELLIPSE" || n.type === "RECTANGLE") &&
             n.getPluginData("markerFor") === node.id);
         existingMarkers.forEach(marker => marker.remove());
-        // Create new marker
-        const indicator = figma.createEllipse();
-        // Set appropriate name and color based on whether the issue can be fixed
-        if (canFix) {
-            indicator.name = "✅ Can Fix Spacing";
-            indicator.fills = [{ type: 'SOLID', color: { r: 0.2, g: 0.8, b: 0.2 } }]; // Green
+        // Create appropriate marker shape based on issue type
+        let indicator;
+        if (issueType === 'borderRadius') {
+            // Use rectangles for border radius issues
+            indicator = figma.createRectangle();
+            indicator.resize(8, 8);
+            if (canFix) {
+                indicator.name = "✅ Can Fix Border Radius";
+                indicator.fills = [{ type: 'SOLID', color: { r: 0.2, g: 0.4, b: 0.8 } }]; // Blue
+            }
+            else {
+                indicator.name = "⚠️ No Radius Token";
+                indicator.fills = [{ type: 'SOLID', color: { r: 0.8, g: 0.4, b: 0.2 } }]; // Orange
+            }
         }
         else {
-            indicator.name = "⚠️ No Token Match";
-            indicator.fills = [{ type: 'SOLID', color: { r: 1, g: 0.2, b: 0.2 } }]; // Red
+            // Use circles for spacing issues (existing behavior)
+            indicator = figma.createEllipse();
+            indicator.resize(8, 8);
+            if (canFix) {
+                indicator.name = "✅ Can Fix Spacing";
+                indicator.fills = [{ type: 'SOLID', color: { r: 0.2, g: 0.8, b: 0.2 } }]; // Green
+            }
+            else {
+                indicator.name = "⚠️ No Token Match";
+                indicator.fills = [{ type: 'SOLID', color: { r: 1, g: 0.2, b: 0.2 } }]; // Red
+            }
         }
-        indicator.resize(8, 8);
         const absoluteX = node.absoluteTransform[0][2];
         const absoluteY = node.absoluteTransform[1][2];
         indicator.x = absoluteX - 12;
@@ -488,14 +563,46 @@ function revertSpacingBindingsToStatic() {
 }
 // Update to the message handler in the main code
 // Add this to your message handler - replace the existing figma.ui.onmessage
+// Updated message handler with all new border radius functionality
 figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
     console.log("Received message from UI:", msg.type);
     try {
-        if (msg.type === 'find-spacing-issues') {
+        if (msg.type === 'find-all-issues') {
+            // New combined find function
+            clearMarkers();
+            const results = yield findAllIssues();
+            const uniqueNodeIds = new Set([
+                ...results.spacingIssues.map(issue => issue.node.id),
+                ...results.borderRadiusIssues.map(issue => issue.node.id)
+            ]);
+            figma.ui.postMessage({
+                type: 'all-issues-found',
+                totalCount: results.totalIssues,
+                spacingCount: results.spacingIssues.length,
+                borderRadiusCount: results.borderRadiusIssues.length,
+                fixableCount: results.fixableIssues,
+                unfixableCount: results.unfixableIssues,
+                nodeCount: uniqueNodeIds.size,
+            });
+            if (results.totalIssues > 0) {
+                const spacingText = results.spacingIssues.length > 0 ? `${results.spacingIssues.length} spacing` : '';
+                const borderRadiusText = results.borderRadiusIssues.length > 0 ? `${results.borderRadiusIssues.length} border radius` : '';
+                const issueTypes = [spacingText, borderRadiusText].filter(text => text).join(' and ');
+                const fixableMessage = results.fixableIssues > 0 ?
+                    `${results.fixableIssues} can be auto-fixed` : '';
+                const unfixableMessage = results.unfixableIssues > 0 ?
+                    `${results.unfixableIssues} have no matching tokens` : '';
+                figma.notify(`Found ${results.totalIssues} issues (${issueTypes}). ${fixableMessage}${fixableMessage && unfixableMessage ? '. ' : ''}${unfixableMessage}`);
+            }
+            else {
+                figma.notify(`No tokenization issues found.`);
+            }
+        }
+        else if (msg.type === 'find-spacing-issues') {
+            // Keep existing spacing-only function for backwards compatibility
             clearMarkers();
             const issues = yield findSpacingIssues();
             const uniqueNodeIds = new Set(issues.map(issue => issue.node.id));
-            // Count issues that can be fixed vs. those that can't
             const fixableIssues = issues.filter(issue => issue.matchingToken !== null);
             const unfixableIssues = issues.filter(issue => issue.matchingToken === null);
             figma.ui.postMessage({
@@ -524,6 +631,24 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
                 unfixableCount: result.unfixable
             });
         }
+        else if (msg.type === 'fix-border-radius-issues') {
+            // New border radius fix function
+            const result = yield fixBorderRadiusIssues();
+            figma.ui.postMessage({
+                type: 'border-radius-issues-fixed',
+                fixedCount: result.fixed,
+                unfixableCount: result.unfixable
+            });
+            if (result.fixed > 0) {
+                figma.notify(`Applied ${result.fixed} border radius variable bindings. ${result.unfixable > 0 ? `${result.unfixable} values have no matching tokens (marked in orange).` : ''}`);
+            }
+            else if (result.unfixable > 0) {
+                figma.notify(`Found ${result.unfixable} border radius values without matching tokens (marked in orange).`);
+            }
+            else {
+                figma.notify(`No unlinked border radius values found.`);
+            }
+        }
         else if (msg.type === 'clear-markers') {
             const clearedCount = clearMarkers();
             figma.ui.postMessage({
@@ -533,23 +658,46 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             if (clearedCount > 0)
                 figma.notify(`Cleared ${clearedCount} markers.`);
         }
+        else if (msg.type === 'revert-all-bindings') {
+            // Updated revert function for both types
+            const result = yield revertAllBindingsToStatic();
+            figma.ui.postMessage({
+                type: 'all-bindings-reverted',
+                spacingCount: result.spacingCount,
+                borderRadiusCount: result.borderRadiusCount,
+                totalCount: result.totalCount
+            });
+            if (result.totalCount > 0) {
+                const spacingText = result.spacingCount > 0 ? `${result.spacingCount} spacing` : '';
+                const borderRadiusText = result.borderRadiusCount > 0 ? `${result.borderRadiusCount} border radius` : '';
+                const revertedTypes = [spacingText, borderRadiusText].filter(text => text).join(' and ');
+                figma.notify(`Converted ${result.totalCount} token bindings (${revertedTypes}) back to static values.`);
+            }
+            else {
+                figma.notify(`No token bindings found to revert.`);
+            }
+        }
         else if (msg.type === 'revert-spacing-bindings') {
+            // Keep old function for backwards compatibility
             const revertedCount = yield revertSpacingBindingsToStatic();
             figma.ui.postMessage({
                 type: 'spacing-bindings-reverted',
                 count: revertedCount
             });
             if (revertedCount > 0) {
-                figma.notify(`Converted ${revertedCount} token bindings back to static values.`);
+                figma.notify(`Converted ${revertedCount} spacing token bindings back to static values.`);
             }
             else {
                 figma.notify(`No spacing token bindings found to revert.`);
             }
         }
         else if (msg.type === 'refresh-variables') {
-            // Add this new message type to force refresh variables cache
+            // Force refresh both caches
             console.log("Force refreshing variables cache...");
-            yield getSpacingVariables(true); // Force refresh
+            yield Promise.all([
+                getSpacingVariables(true),
+                getBorderRadiusVariables(true)
+            ]);
             figma.notify("Variables cache refreshed");
             figma.ui.postMessage({
                 type: 'variables-refreshed'
@@ -571,15 +719,17 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
 });
 function clearMarkers() {
     try {
-        const markers = figma.currentPage.children.filter(node => node.type === "ELLIPSE" &&
+        const markers = figma.currentPage.children.filter(node => (node.type === "ELLIPSE" || node.type === "RECTANGLE") &&
             (node.name === "⚠️ No Token Match" ||
                 node.name === "✅ Can Fix Spacing" ||
+                node.name === "⚠️ No Radius Token" ||
+                node.name === "✅ Can Fix Border Radius" ||
                 node.name === "⚠️ Spacing Issue" ||
                 node.name === "🎨 Color Issue") &&
             node.getPluginData("markerFor") !== "");
         let clearedCount = 0;
         markers.forEach(markerNode => {
-            if (markerNode.type === "ELLIPSE") {
+            if (markerNode.type === "ELLIPSE" || markerNode.type === "RECTANGLE") {
                 markerNode.remove();
                 clearedCount++;
             }
@@ -596,4 +746,293 @@ function clearMarkers() {
         console.error(`Error clearing markers: ${message}`);
         return 0;
     }
+}
+function findBorderRadiusIssues() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const borderRadiusTokens = yield getBorderRadiusVariables(); // Uses cache by default
+        const issues = [];
+        // Pre-create a Map for faster token lookup by value
+        const tokensByValue = new Map();
+        borderRadiusTokens.forEach(token => {
+            tokensByValue.set(token.value, token);
+        });
+        function isIndividualRadiusBound(node, propertyName) {
+            var _a;
+            try {
+                return ((_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName]) !== undefined;
+            }
+            catch (e) {
+                console.warn(`Could not check boundVariables for ${node.name}.${propertyName}:`, e);
+                return false;
+            }
+        }
+        function areAllRadiiSameAndPositive(node) {
+            // Double-check that the node has radius properties
+            if (!hasRadiusProperties(node))
+                return false;
+            const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
+            return topLeftRadius > 0 &&
+                topLeftRadius === topRightRadius &&
+                topLeftRadius === bottomLeftRadius &&
+                topLeftRadius === bottomRightRadius;
+        }
+        function areAllRadiiBound(node) {
+            return isIndividualRadiusBound(node, 'topLeftRadius') &&
+                isIndividualRadiusBound(node, 'topRightRadius') &&
+                isIndividualRadiusBound(node, 'bottomLeftRadius') &&
+                isIndividualRadiusBound(node, 'bottomRightRadius');
+        }
+        // Optimized token lookup using Map
+        function findMatchingTokenByValue(value) {
+            return tokensByValue.get(value) || null;
+        }
+        function checkNode(node) {
+            if (isBorderRadiusNode(node) && hasRadiusProperties(node)) {
+                const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
+                const allRadiiSameAndPositive = areAllRadiiSameAndPositive(node);
+                // Check if all radii are the same and can be unified
+                if (allRadiiSameAndPositive && !areAllRadiiBound(node)) {
+                    const token = findMatchingTokenByValue(topLeftRadius);
+                    issues.push({
+                        node,
+                        property: "borderRadiusAll",
+                        currentValue: topLeftRadius,
+                        matchingToken: token,
+                        message: token ? `Map all corners to ${token.name}` : `No token for ${topLeftRadius}px uniform radius.`
+                    });
+                    addMarkerToNode(node, token ? "✅ Can Fix Border Radius" : "⚠️ No Radius Token", token !== null, 'borderRadius');
+                }
+                else {
+                    // Check individual corner radii
+                    const radiiToCheck = [
+                        { value: topLeftRadius, property: 'topLeftRadius', displayName: 'top-left' },
+                        { value: topRightRadius, property: 'topRightRadius', displayName: 'top-right' },
+                        { value: bottomLeftRadius, property: 'bottomLeftRadius', displayName: 'bottom-left' },
+                        { value: bottomRightRadius, property: 'bottomRightRadius', displayName: 'bottom-right' }
+                    ];
+                    for (const radius of radiiToCheck) {
+                        if (radius.value > 0 && !isIndividualRadiusBound(node, radius.property) && !allRadiiSameAndPositive) {
+                            const token = findMatchingTokenByValue(radius.value);
+                            issues.push({
+                                node,
+                                property: radius.property,
+                                currentValue: radius.value,
+                                matchingToken: token,
+                                message: token ? `Map ${radius.displayName} radius to ${token.name}` : `No token for ${radius.value}px ${radius.displayName} radius.`
+                            });
+                            addMarkerToNode(node, token ? "✅ Can Fix Border Radius" : "⚠️ No Radius Token", token !== null, 'borderRadius');
+                        }
+                    }
+                }
+            }
+            // Recursively check children
+            if ("children" in node) {
+                for (const child of node.children) {
+                    checkNode(child);
+                }
+            }
+        }
+        // Smart scoping: prioritize selection, but don't process entire page unnecessarily
+        const selection = figma.currentPage.selection;
+        const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
+        console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for border radius issues...`);
+        for (const node of nodesToCheck) {
+            checkNode(node);
+        }
+        console.log(`Found ${issues.length} potential border radius issues.`);
+        return issues;
+    });
+}
+function findAllIssues() {
+    return __awaiter(this, void 0, void 0, function* () {
+        console.log("Finding all tokenization issues...");
+        // Run both detection functions
+        const [spacingIssues, borderRadiusIssues] = yield Promise.all([
+            findSpacingIssues(),
+            findBorderRadiusIssues()
+        ]);
+        const totalIssues = spacingIssues.length + borderRadiusIssues.length;
+        const fixableIssues = spacingIssues.filter(issue => issue.matchingToken !== null).length +
+            borderRadiusIssues.filter(issue => issue.matchingToken !== null).length;
+        const unfixableIssues = totalIssues - fixableIssues;
+        return {
+            spacingIssues,
+            borderRadiusIssues,
+            totalIssues,
+            fixableIssues,
+            unfixableIssues
+        };
+    });
+}
+// Border radius binding function
+function trySetBoundVariableRadius(node, propertyName, token) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        try {
+            console.log(`Binding ${node.name}.${propertyName} to variable: ${token.name} (ID: ${token.id})`);
+            node.setBoundVariable(propertyName, token.variableObject);
+            // Verify using node.boundVariables and the token's ID
+            const boundVariableAlias = (_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName];
+            if (boundVariableAlias && boundVariableAlias.id === token.id) {
+                console.log(`Successfully bound ${propertyName} for ${node.name} to ${token.name}`);
+                return true;
+            }
+            else {
+                console.warn(`Verification failed for ${node.name}.${propertyName}. Bound alias:`, boundVariableAlias, `Expected ID: ${token.id}`);
+                return false;
+            }
+        }
+        catch (e) {
+            let message = 'Unknown error during binding';
+            if (e instanceof Error)
+                message = e.message;
+            else if (typeof e === 'string')
+                message = e;
+            console.error(`Error binding ${propertyName} for node ${node.name} to variable ${token.name} (ID: ${token.id}): ${message}`);
+            if (!token.variableObject || typeof token.variableObject.key !== 'string') {
+                console.error("The provided token.variableObject seems invalid:", token.variableObject);
+            }
+            return false;
+        }
+    });
+}
+// Fix border radius issues
+function fixBorderRadiusIssues() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const issues = yield findBorderRadiusIssues();
+        let fixedCount = 0;
+        let unfixableCount = 0;
+        console.log(`Attempting to fix ${issues.length} border radius issues.`);
+        // Count issues that don't have matching tokens
+        issues.forEach(issue => {
+            if (!issue.matchingToken) {
+                unfixableCount++;
+            }
+        });
+        for (const issue of issues) {
+            if (issue.matchingToken && issue.matchingToken.variableObject) {
+                const { node, property, matchingToken } = issue;
+                let success = false;
+                if (property === "borderRadiusAll") {
+                    const propsToBind = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
+                    let allSuccess = true;
+                    for (const p of propsToBind) {
+                        if (!(yield trySetBoundVariableRadius(node, p, matchingToken)))
+                            allSuccess = false;
+                    }
+                    success = allSuccess;
+                }
+                else if (property === "topLeftRadius" || property === "topRightRadius" || property === "bottomLeftRadius" || property === "bottomRightRadius") {
+                    success = yield trySetBoundVariableRadius(node, property, matchingToken);
+                }
+                if (success) {
+                    fixedCount++;
+                }
+            }
+        }
+        console.log(`Successfully applied ${fixedCount} border radius variable bindings.`);
+        console.log(`Unable to fix ${unfixableCount} issues due to missing matching tokens.`);
+        return { fixed: fixedCount, unfixable: unfixableCount };
+    });
+}
+// Updated revert function to handle both spacing and border radius
+function revertAllBindingsToStatic() {
+    return __awaiter(this, void 0, void 0, function* () {
+        let spacingRevertedCount = 0;
+        let borderRadiusRevertedCount = 0;
+        // Helper function to remove binding and set static value for spacing
+        function removeSpacingBindingAndSetStatic(node, property) {
+            try {
+                if (!node.boundVariables || !node.boundVariables[property]) {
+                    return false;
+                }
+                const currentValue = node[property];
+                node.setBoundVariable(property, null);
+                node[property] = currentValue;
+                return true;
+            }
+            catch (e) {
+                console.error(`Error removing spacing binding for ${property} on node "${node.name}":`, e);
+                return false;
+            }
+        }
+        // Helper function to remove binding and set static value for border radius
+        function removeBorderRadiusBindingAndSetStatic(node, property) {
+            try {
+                if (!node.boundVariables || !node.boundVariables[property]) {
+                    return false;
+                }
+                const currentValue = node[property];
+                node.setBoundVariable(property, null);
+                node[property] = currentValue;
+                return true;
+            }
+            catch (e) {
+                console.error(`Error removing border radius binding for ${property} on node "${node.name}":`, e);
+                return false;
+            }
+        }
+        // Function to process a node and revert its bindings
+        function processNode(node) {
+            let nodeSpacingRevertCount = 0;
+            let nodeBorderRadiusRevertCount = 0;
+            // Handle spacing properties
+            if (isAutoLayoutNode(node)) {
+                const spacingProperties = [
+                    'itemSpacing',
+                    'paddingTop',
+                    'paddingBottom',
+                    'paddingLeft',
+                    'paddingRight'
+                ];
+                for (const property of spacingProperties) {
+                    if (removeSpacingBindingAndSetStatic(node, property)) {
+                        nodeSpacingRevertCount++;
+                        console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
+                    }
+                }
+            }
+            // Handle border radius properties
+            if (isBorderRadiusNode(node)) {
+                const borderRadiusProperties = [
+                    'topLeftRadius',
+                    'topRightRadius',
+                    'bottomLeftRadius',
+                    'bottomRightRadius'
+                ];
+                for (const property of borderRadiusProperties) {
+                    if (removeBorderRadiusBindingAndSetStatic(node, property)) {
+                        nodeBorderRadiusRevertCount++;
+                        console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
+                    }
+                }
+            }
+            // Process children recursively
+            if ("children" in node) {
+                for (const child of node.children) {
+                    const childResults = processNode(child);
+                    nodeSpacingRevertCount += childResults.spacing;
+                    nodeBorderRadiusRevertCount += childResults.borderRadius;
+                }
+            }
+            return { spacing: nodeSpacingRevertCount, borderRadius: nodeBorderRadiusRevertCount };
+        }
+        // Get nodes to process (selection or all page nodes)
+        const nodesToProcess = figma.currentPage.selection.length > 0
+            ? figma.currentPage.selection
+            : figma.currentPage.children;
+        // Process all nodes
+        for (const node of nodesToProcess) {
+            const results = processNode(node);
+            spacingRevertedCount += results.spacing;
+            borderRadiusRevertedCount += results.borderRadius;
+        }
+        const totalCount = spacingRevertedCount + borderRadiusRevertedCount;
+        console.log(`Reverted ${spacingRevertedCount} spacing token bindings and ${borderRadiusRevertedCount} border radius token bindings to static values.`);
+        return {
+            spacingCount: spacingRevertedCount,
+            borderRadiusCount: borderRadiusRevertedCount,
+            totalCount
+        };
+    });
 }
