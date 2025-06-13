@@ -222,7 +222,18 @@
       </div>
     </div>
   </details>
+  <button
+    id="debug-btn"
+    style="background: red; color: white; padding: 4px 8px"
+  >
+    DEBUG
+  </button>
 
+  <script>
+    document.getElementById("debug-btn").onclick = () => {
+      parent.postMessage({ pluginMessage: { type: "debug-collections" } }, "*");
+    };
+  </script>
   <button id="find-all-issues" class="secondary">Find All Issues</button>
   <button id="clear-markers" class="tertiary">Clear All Markers</button>
 </div>
