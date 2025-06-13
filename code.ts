@@ -1237,7 +1237,7 @@ async function revertAllBindingsToStatic(): Promise<{spacingCount: number, borde
 
 
 
-// Get all available variable collections
+// Enhanced getAvailableCollections with better debugging
 async function getAvailableCollections(forceRefresh: boolean = false): Promise<TokenCollection[]> {
   const now = Date.now();
   
@@ -1253,6 +1253,7 @@ async function getAvailableCollections(forceRefresh: boolean = false): Promise<T
     if (hasGetLocalVariableCollections) {
       const localCollections = await figma.variables.getLocalVariableCollectionsAsync();
       localCollections.forEach(collection => {
+        console.log(`📁 Local collection: "${collection.name}" → ID: ${collection.id}`);
         collections.push({
           id: collection.id,
           name: collection.name,
@@ -1262,10 +1263,11 @@ async function getAvailableCollections(forceRefresh: boolean = false): Promise<T
       console.log(`Found ${localCollections.length} local collections`);
     }
 
-    // Get library collections
+    // Get library collections  
     if (hasTeamLibraryAPI) {
       const libraryCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
       libraryCollections.forEach(collection => {
+        console.log(`📚 Library collection: "${collection.name}" → Key: ${collection.key}`);
         collections.push({
           id: collection.key, // Note: library collections use 'key' not 'id'
           name: collection.name,
@@ -1355,7 +1357,6 @@ async function debugCollectionsAndVariables(): Promise<void> {
   }
 }
 
-// Also, you need to clean up your getBorderRadiusVariables function - remove the nested debug function
 async function getBorderRadiusVariables(
   forceRefresh: boolean = false,
   filterByCollectionId?: string
@@ -1376,13 +1377,13 @@ async function getBorderRadiusVariables(
   const allResolvedVariables = await getAllVariablesAndImportLibraries();
   console.log(`Processing ${allResolvedVariables.length} variables for border radius tokens.`);
 
-
   const borderRadiusTokens: BorderRadiusToken[] = [];
   
   // Enhanced debug: Let's see what variables we're processing
   let floatVariableCount = 0;
   let nameMatchCount = 0;
-  let debugVariableNames: string[] = []; // NEW: Track all FLOAT variable names
+  let debugVariableNames: string[] = [];
+  let collectionMatchCount = 0; // NEW: Track collection matches
 
   for (const variable of allResolvedVariables) {
     if (variable.resolvedType !== 'FLOAT') {
@@ -1390,13 +1391,22 @@ async function getBorderRadiusVariables(
     }
     floatVariableCount++;
 
-    // Filter by collection if specified
-    if (filterByCollectionId && variable.variableCollectionId !== filterByCollectionId) {
-      continue;
-    }
-
     const variableName = variable.name;
-    debugVariableNames.push(variableName); // NEW: Add all FLOAT variable names
+    debugVariableNames.push(variableName);
+    
+    // Enhanced collection filtering debug
+    if (filterByCollectionId) {
+      const variableCollectionId = variable.variableCollectionId;
+      console.log(`🔍 Collection check: "${variableName}" is in collection "${variableCollectionId}", looking for "${filterByCollectionId}"`);
+      
+      if (variableCollectionId !== filterByCollectionId) {
+        console.log(`❌ Collection mismatch: skipping "${variableName}"`);
+        continue;
+      } else {
+        console.log(`✅ Collection match: including "${variableName}"`);
+        collectionMatchCount++;
+      }
+    }
     
     const modeIds = Object.keys(variable.valuesByMode);
     if (modeIds.length === 0) {
@@ -1422,8 +1432,7 @@ async function getBorderRadiusVariables(
           variableObject: variable,
         });
       } else {
-        // NEW: Log why it didn't match
-        console.log(`❌ No match: "${variableName}" (${variableValue}px)`);
+        console.log(`❌ No pattern match: "${variableName}" (${variableValue}px)`);
       }
     }
   }
@@ -1432,16 +1441,17 @@ async function getBorderRadiusVariables(
   console.log(`🔍 Border radius debug for ${cacheKey}:`);
   console.log(`- Total variables processed: ${allResolvedVariables.length}`);
   console.log(`- FLOAT variables: ${floatVariableCount}`);
-  console.log(`- FLOAT variable names:`, debugVariableNames); // NEW: Show all names
-  console.log(`- Name matches: ${nameMatchCount}`);
+  console.log(`- Collection filter active: ${filterByCollectionId ? 'YES' : 'NO'}`);
+  if (filterByCollectionId) {
+    console.log(`- Variables matching collection: ${collectionMatchCount}`);
+  }
+  console.log(`- FLOAT variable names:`, debugVariableNames);
+  console.log(`- Pattern matches: ${nameMatchCount}`);
   console.log(`- Final border radius tokens: ${borderRadiusTokens.length}`);
 
-  // Test specific patterns
-  console.log(`🧪 Pattern testing:`);
-  debugVariableNames.forEach(name => {
-    const matches = isBorderRadiusVariable(name);
-    console.log(`  "${name}" → ${matches ? '✅ MATCH' : '❌ no match'}`);
-  });
+  // Show unique collection IDs present in variables
+  const uniqueCollectionIds = [...new Set(allResolvedVariables.map(v => v.variableCollectionId))];
+  console.log(`📂 Collection IDs found in variables:`, uniqueCollectionIds);
 
   // Cache the results by collection
   cachedBorderRadiusTokensByCollection.set(cacheKey, borderRadiusTokens);
@@ -1452,12 +1462,6 @@ async function getBorderRadiusVariables(
     borderRadiusCacheTimestamp = now;
   }
 
-/////
-
-
-////
-
   console.log(`Total border radius tokens found and cached for ${cacheKey}: ${borderRadiusTokens.length}`);
   return borderRadiusTokens;
-  
 }

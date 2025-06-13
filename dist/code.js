@@ -1060,7 +1060,7 @@ function revertAllBindingsToStatic() {
         };
     });
 }
-// Get all available variable collections
+// Enhanced getAvailableCollections with better debugging
 function getAvailableCollections() {
     return __awaiter(this, arguments, void 0, function* (forceRefresh = false) {
         const now = Date.now();
@@ -1074,6 +1074,7 @@ function getAvailableCollections() {
             if (hasGetLocalVariableCollections) {
                 const localCollections = yield figma.variables.getLocalVariableCollectionsAsync();
                 localCollections.forEach(collection => {
+                    console.log(`📁 Local collection: "${collection.name}" → ID: ${collection.id}`);
                     collections.push({
                         id: collection.id,
                         name: collection.name,
@@ -1082,10 +1083,11 @@ function getAvailableCollections() {
                 });
                 console.log(`Found ${localCollections.length} local collections`);
             }
-            // Get library collections
+            // Get library collections  
             if (hasTeamLibraryAPI) {
                 const libraryCollections = yield figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
                 libraryCollections.forEach(collection => {
+                    console.log(`📚 Library collection: "${collection.name}" → Key: ${collection.key}`);
                     collections.push({
                         id: collection.key, // Note: library collections use 'key' not 'id'
                         name: collection.name,
@@ -1165,7 +1167,6 @@ function debugCollectionsAndVariables() {
         }
     });
 }
-// Also, you need to clean up your getBorderRadiusVariables function - remove the nested debug function
 function getBorderRadiusVariables() {
     return __awaiter(this, arguments, void 0, function* (forceRefresh = false, filterByCollectionId) {
         const now = Date.now();
@@ -1184,18 +1185,28 @@ function getBorderRadiusVariables() {
         // Enhanced debug: Let's see what variables we're processing
         let floatVariableCount = 0;
         let nameMatchCount = 0;
-        let debugVariableNames = []; // NEW: Track all FLOAT variable names
+        let debugVariableNames = [];
+        let collectionMatchCount = 0; // NEW: Track collection matches
         for (const variable of allResolvedVariables) {
             if (variable.resolvedType !== 'FLOAT') {
                 continue;
             }
             floatVariableCount++;
-            // Filter by collection if specified
-            if (filterByCollectionId && variable.variableCollectionId !== filterByCollectionId) {
-                continue;
-            }
             const variableName = variable.name;
-            debugVariableNames.push(variableName); // NEW: Add all FLOAT variable names
+            debugVariableNames.push(variableName);
+            // Enhanced collection filtering debug
+            if (filterByCollectionId) {
+                const variableCollectionId = variable.variableCollectionId;
+                console.log(`🔍 Collection check: "${variableName}" is in collection "${variableCollectionId}", looking for "${filterByCollectionId}"`);
+                if (variableCollectionId !== filterByCollectionId) {
+                    console.log(`❌ Collection mismatch: skipping "${variableName}"`);
+                    continue;
+                }
+                else {
+                    console.log(`✅ Collection match: including "${variableName}"`);
+                    collectionMatchCount++;
+                }
+            }
             const modeIds = Object.keys(variable.valuesByMode);
             if (modeIds.length === 0) {
                 continue;
@@ -1218,8 +1229,7 @@ function getBorderRadiusVariables() {
                     });
                 }
                 else {
-                    // NEW: Log why it didn't match
-                    console.log(`❌ No match: "${variableName}" (${variableValue}px)`);
+                    console.log(`❌ No pattern match: "${variableName}" (${variableValue}px)`);
                 }
             }
         }
@@ -1227,15 +1237,16 @@ function getBorderRadiusVariables() {
         console.log(`🔍 Border radius debug for ${cacheKey}:`);
         console.log(`- Total variables processed: ${allResolvedVariables.length}`);
         console.log(`- FLOAT variables: ${floatVariableCount}`);
-        console.log(`- FLOAT variable names:`, debugVariableNames); // NEW: Show all names
-        console.log(`- Name matches: ${nameMatchCount}`);
+        console.log(`- Collection filter active: ${filterByCollectionId ? 'YES' : 'NO'}`);
+        if (filterByCollectionId) {
+            console.log(`- Variables matching collection: ${collectionMatchCount}`);
+        }
+        console.log(`- FLOAT variable names:`, debugVariableNames);
+        console.log(`- Pattern matches: ${nameMatchCount}`);
         console.log(`- Final border radius tokens: ${borderRadiusTokens.length}`);
-        // Test specific patterns
-        console.log(`🧪 Pattern testing:`);
-        debugVariableNames.forEach(name => {
-            const matches = isBorderRadiusVariable(name);
-            console.log(`  "${name}" → ${matches ? '✅ MATCH' : '❌ no match'}`);
-        });
+        // Show unique collection IDs present in variables
+        const uniqueCollectionIds = [...new Set(allResolvedVariables.map(v => v.variableCollectionId))];
+        console.log(`📂 Collection IDs found in variables:`, uniqueCollectionIds);
         // Cache the results by collection
         cachedBorderRadiusTokensByCollection.set(cacheKey, borderRadiusTokens);
         // Also update the legacy cache if this is for "all" collections
@@ -1243,8 +1254,6 @@ function getBorderRadiusVariables() {
             cachedBorderRadiusTokens = borderRadiusTokens;
             borderRadiusCacheTimestamp = now;
         }
-        /////
-        ////
         console.log(`Total border radius tokens found and cached for ${cacheKey}: ${borderRadiusTokens.length}`);
         return borderRadiusTokens;
     });
