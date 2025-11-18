@@ -1447,7 +1447,13 @@ async function mapLocalVariablesToLibrary(localVariableIds, libraryCollectionId)
         }
         // Update all node bindings that reference this local variable
         let affectedNodes = 0;
+        const processedNodeIds = new Set(); // Track processed nodes to avoid duplicates
         function updateNodeBindings(node) {
+            // Skip if already processed (prevents duplicate processing when parent and child both selected)
+            if (processedNodeIds.has(node.id)) {
+                return;
+            }
+            processedNodeIds.add(node.id);
             // Check if this node has any bound variables
             if ('boundVariables' in node && node.boundVariables) {
                 let nodeUpdated = false;
