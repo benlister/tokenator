@@ -1768,15 +1768,32 @@ async function mapLocalVariablesToLibrary(
         for (const [propertyName, binding] of Object.entries(node.boundVariables)) {
           if (!binding) continue;
 
-          // Check if this binding references our local variable
-          if ('id' in binding && binding.id === localVariable.id) {
-            try {
-              // Update the binding to use the library variable
-              (node as any).setBoundVariable(propertyName, libraryVariable);
-              nodeUpdated = true;
-              console.log(`Updated ${node.name}.${propertyName} from "${localVariable.name}" to "${libraryVariable.name}"`);
-            } catch (error) {
-              console.error(`Error updating binding for ${node.name}.${propertyName}:`, error);
+          // Handle both single bindings and array bindings
+          if (Array.isArray(binding)) {
+            // Array binding (e.g., fills, strokes, effects with multiple variables)
+            binding.forEach((item, index) => {
+              if (item && 'id' in item && item.id === localVariable.id) {
+                try {
+                  // Update the specific index in the array binding
+                  (node as any).setBoundVariable(propertyName, libraryVariable, index);
+                  nodeUpdated = true;
+                  console.log(`Updated ${node.name}.${propertyName}[${index}] from "${localVariable.name}" to "${libraryVariable.name}"`);
+                } catch (error) {
+                  console.error(`Error updating array binding for ${node.name}.${propertyName}[${index}]:`, error);
+                }
+              }
+            });
+          } else {
+            // Single binding (e.g., single fill, stroke, or other property)
+            if ('id' in binding && binding.id === localVariable.id) {
+              try {
+                // Update the binding to use the library variable
+                (node as any).setBoundVariable(propertyName, libraryVariable);
+                nodeUpdated = true;
+                console.log(`Updated ${node.name}.${propertyName} from "${localVariable.name}" to "${libraryVariable.name}"`);
+              } catch (error) {
+                console.error(`Error updating binding for ${node.name}.${propertyName}:`, error);
+              }
             }
           }
         }
