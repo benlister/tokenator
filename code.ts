@@ -49,6 +49,28 @@ interface TokenCollection {
   isLocal: boolean;
 }
 
+// Color variable token (for variable mapping feature)
+interface ColorVariableToken {
+  id: string;
+  key: string;
+  name: string;
+  variableObject: Variable;
+  collectionId: string;
+  collectionName: string;
+  isLocal: boolean;
+}
+
+// Variable mapping result
+interface VariableMappingResult {
+  localVariableName: string;
+  localVariableId: string;
+  libraryVariableName: string | null;
+  libraryVariableId: string | null;
+  success: boolean;
+  error?: string;
+  affectedNodes: number;
+}
+
 // Enhanced caching system - cache tokens per collection
 let cachedSpacingTokensByCollection: Map<string, SpacingToken[]> = new Map();
 let cachedBorderRadiusTokensByCollection: Map<string, BorderRadiusToken[]> = new Map();
@@ -853,6 +875,53 @@ figma.ui.onmessage = async (msg) => {
       figma.ui.postMessage({
         type: 'variables-refreshed'
       });
+    } else if (msg.type === 'get-local-color-variables') {
+      // Get local color variables for the mapping UI
+      const colorVariables = await getLocalColorVariables();
+
+      figma.ui.postMessage({
+        type: 'local-color-variables-loaded',
+        variables: colorVariables.map(v => ({
+          id: v.id,
+          name: v.name,
+          collectionName: v.collectionName
+        }))
+      });
+    } else if (msg.type === 'get-library-collections') {
+      // Get library collections (exclude local ones)
+      const allCollections = await getAvailableCollections();
+      const libraryCollections = allCollections.filter(c => !c.isLocal);
+
+      figma.ui.postMessage({
+        type: 'library-collections-loaded',
+        collections: libraryCollections
+      });
+    } else if (msg.type === 'map-local-variables') {
+      // Execute variable mapping
+      const { localVariableIds, libraryCollectionId } = msg;
+
+      console.log(`Mapping ${localVariableIds.length} variables to library collection ${libraryCollectionId}`);
+
+      const results = await mapLocalVariablesToLibrary(localVariableIds, libraryCollectionId);
+
+      // Count successes and failures
+      const successCount = results.filter(r => r.success).length;
+      const failureCount = results.filter(r => !r.success).length;
+      const totalNodesAffected = results.reduce((sum, r) => sum + r.affectedNodes, 0);
+
+      figma.ui.postMessage({
+        type: 'mapping-complete',
+        results: results,
+        successCount: successCount,
+        failureCount: failureCount,
+        totalNodesAffected: totalNodesAffected
+      });
+
+      if (successCount > 0) {
+        figma.notify(`Mapped ${successCount} variables to library (${totalNodesAffected} nodes updated). ${failureCount > 0 ? `${failureCount} failed.` : ''}`);
+      } else {
+        figma.notify(`Failed to map variables. Check console for details.`, { error: true });
+      }
     } else if (msg.type === 'debug-collections') {
   await debugCollectionsAndVariables();
   figma.notify("Debug complete - check console for details");
@@ -1464,4 +1533,248 @@ async function getBorderRadiusVariables(
 
   console.log(`Total border radius tokens found and cached for ${cacheKey}: ${borderRadiusTokens.length}`);
   return borderRadiusTokens;
+}
+
+// Get local color variables for variable mapping
+async function getLocalColorVariables(): Promise<ColorVariableToken[]> {
+  if (!hasGetLocalVariables) {
+    console.warn("getLocalVariablesAsync not available");
+    return [];
+  }
+
+  try {
+    const localVariables = await figma.variables.getLocalVariablesAsync();
+    const colorVariables: ColorVariableToken[] = [];
+
+    // Get collection info for each variable
+    const collections = await getAvailableCollections();
+    const collectionMap = new Map(collections.map(c => [c.id, c]));
+
+    for (const variable of localVariables) {
+      // Only include COLOR type variables
+      if (variable.resolvedType !== 'COLOR') {
+        continue;
+      }
+
+      const collection = collectionMap.get(variable.variableCollectionId);
+
+      colorVariables.push({
+        id: variable.id,
+        key: variable.key,
+        name: variable.name,
+        variableObject: variable,
+        collectionId: variable.variableCollectionId,
+        collectionName: collection?.name || 'Unknown',
+        isLocal: true
+      });
+    }
+
+    console.log(`Found ${colorVariables.length} local color variables`);
+    return colorVariables;
+  } catch (error) {
+    console.error("Error getting local color variables:", error);
+    return [];
+  }
+}
+
+// Match a local variable to a library variable by name
+// Supports two patterns:
+// 1. Exact match: "table--foreground-bright" → "table--foreground-bright"
+// 2. Component-prefixed: "table--foreground-bright" → "Table/table--foreground-bright"
+async function matchVariableToLibrary(
+  localVariableName: string,
+  libraryCollectionId: string
+): Promise<Variable | null> {
+  try {
+    // Get all variables from the library collection
+    if (!hasTeamLibraryAPI) {
+      console.warn("Team Library API not available");
+      return null;
+    }
+
+    const libraryVariablesInCollection = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libraryCollectionId);
+
+    // First, try exact match
+    for (const libVarStub of libraryVariablesInCollection) {
+      if (libVarStub.name === localVariableName) {
+        console.log(`✅ Exact match found: "${localVariableName}" → "${libVarStub.name}"`);
+        const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+        return importedVariable;
+      }
+    }
+
+    // Second, try component-prefixed pattern
+    // Extract potential component prefix from the variable name
+    // E.g., "table--foreground-bright" → try "Table/table--foreground-bright"
+    const potentialPrefixes = extractComponentPrefixes(localVariableName);
+
+    for (const prefix of potentialPrefixes) {
+      const componentPrefixedName = `${prefix}/${localVariableName}`;
+
+      for (const libVarStub of libraryVariablesInCollection) {
+        if (libVarStub.name === componentPrefixedName) {
+          console.log(`✅ Component-prefixed match found: "${localVariableName}" → "${libVarStub.name}"`);
+          const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+          return importedVariable;
+        }
+      }
+    }
+
+    console.log(`❌ No match found for "${localVariableName}" in library`);
+    return null;
+  } catch (error) {
+    console.error(`Error matching variable "${localVariableName}":`, error);
+    return null;
+  }
+}
+
+// Extract potential component prefixes from a variable name
+// E.g., "table--foreground-bright" → ["Table", "table"]
+// E.g., "button-primary" → ["Button", "button"]
+function extractComponentPrefixes(variableName: string): string[] {
+  const prefixes: string[] = [];
+
+  // Split on common delimiters
+  const delimiters = ['--', '-', '_', '/'];
+
+  for (const delimiter of delimiters) {
+    if (variableName.includes(delimiter)) {
+      const parts = variableName.split(delimiter);
+      const firstPart = parts[0];
+
+      // Add capitalized version (e.g., "table" → "Table")
+      if (firstPart) {
+        const capitalized = firstPart.charAt(0).toUpperCase() + firstPart.slice(1);
+        if (!prefixes.includes(capitalized)) {
+          prefixes.push(capitalized);
+        }
+
+        // Also add lowercase version
+        if (!prefixes.includes(firstPart)) {
+          prefixes.push(firstPart);
+        }
+      }
+
+      break; // Only use the first delimiter found
+    }
+  }
+
+  return prefixes;
+}
+
+// Map local variables to library variables
+// This function:
+// 1. Matches selected local variables to library variables by name
+// 2. Updates all node bindings in the current selection to use library variables
+// 3. Returns detailed results for each variable mapping
+async function mapLocalVariablesToLibrary(
+  localVariableIds: string[],
+  libraryCollectionId: string
+): Promise<VariableMappingResult[]> {
+  const results: VariableMappingResult[] = [];
+
+  console.log(`Starting variable mapping: ${localVariableIds.length} local variables to library collection ${libraryCollectionId}`);
+
+  // Get all local variables
+  const allLocalVariables = await getLocalColorVariables();
+  const localVariableMap = new Map(allLocalVariables.map(v => [v.id, v]));
+
+  // Get nodes to process (selection or entire page)
+  const selection = figma.currentPage.selection;
+  const nodesToProcess = selection.length > 0 ? selection : figma.currentPage.children;
+
+  console.log(`Processing ${nodesToProcess.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes`);
+
+  // Process each selected local variable
+  for (const localVariableId of localVariableIds) {
+    const localVariable = localVariableMap.get(localVariableId);
+
+    if (!localVariable) {
+      results.push({
+        localVariableName: 'Unknown',
+        localVariableId: localVariableId,
+        libraryVariableName: null,
+        libraryVariableId: null,
+        success: false,
+        error: 'Local variable not found',
+        affectedNodes: 0
+      });
+      continue;
+    }
+
+    // Try to match this local variable to a library variable
+    const libraryVariable = await matchVariableToLibrary(
+      localVariable.name,
+      libraryCollectionId
+    );
+
+    if (!libraryVariable) {
+      results.push({
+        localVariableName: localVariable.name,
+        localVariableId: localVariable.id,
+        libraryVariableName: null,
+        libraryVariableId: null,
+        success: false,
+        error: 'No matching library variable found',
+        affectedNodes: 0
+      });
+      continue;
+    }
+
+    // Update all node bindings that reference this local variable
+    let affectedNodes = 0;
+
+    function updateNodeBindings(node: SceneNode): void {
+      // Check if this node has any bound variables
+      if ('boundVariables' in node && node.boundVariables) {
+        let nodeUpdated = false;
+
+        // Iterate through all possible bound properties
+        for (const [propertyName, binding] of Object.entries(node.boundVariables)) {
+          if (!binding) continue;
+
+          // Check if this binding references our local variable
+          if ('id' in binding && binding.id === localVariable.id) {
+            try {
+              // Update the binding to use the library variable
+              (node as any).setBoundVariable(propertyName, libraryVariable);
+              nodeUpdated = true;
+              console.log(`Updated ${node.name}.${propertyName} from "${localVariable.name}" to "${libraryVariable.name}"`);
+            } catch (error) {
+              console.error(`Error updating binding for ${node.name}.${propertyName}:`, error);
+            }
+          }
+        }
+
+        if (nodeUpdated) {
+          affectedNodes++;
+        }
+      }
+
+      // Recursively process children
+      if ('children' in node) {
+        for (const child of node.children) {
+          updateNodeBindings(child);
+        }
+      }
+    }
+
+    // Process all nodes
+    for (const node of nodesToProcess) {
+      updateNodeBindings(node);
+    }
+
+    results.push({
+      localVariableName: localVariable.name,
+      localVariableId: localVariable.id,
+      libraryVariableName: libraryVariable.name,
+      libraryVariableId: libraryVariable.id,
+      success: true,
+      affectedNodes: affectedNodes
+    });
+
+    console.log(`✅ Mapped "${localVariable.name}" → "${libraryVariable.name}" (${affectedNodes} nodes affected)`);
+  }
+
+  return results;
 }
