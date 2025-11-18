@@ -1315,11 +1315,11 @@ async function getLocalColorVariables() {
         return [];
     }
 }
-// Match a local variable to a library variable by name
+// Match a local variable to a library variable by name and type
 // Supports two patterns:
 // 1. Exact match: "table--foreground-bright" → "table--foreground-bright"
 // 2. Component-prefixed: "table--foreground-bright" → "Table/table--foreground-bright"
-async function matchVariableToLibrary(localVariableName, libraryCollectionId) {
+async function matchVariableToLibrary(localVariableName, libraryCollectionId, expectedResolvedType) {
     try {
         // Get all variables from the library collection
         if (!hasTeamLibraryAPI) {
@@ -1330,8 +1330,14 @@ async function matchVariableToLibrary(localVariableName, libraryCollectionId) {
         // First, try exact match
         for (const libVarStub of libraryVariablesInCollection) {
             if (libVarStub.name === localVariableName) {
-                console.log(`✅ Exact match found: "${localVariableName}" → "${libVarStub.name}"`);
                 const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+                // Validate that the types match
+                if (importedVariable.resolvedType !== expectedResolvedType) {
+                    console.warn(`⚠️ Name match found but type mismatch: "${localVariableName}" ` +
+                        `(expected ${expectedResolvedType}, got ${importedVariable.resolvedType}). Skipping.`);
+                    continue;
+                }
+                console.log(`✅ Exact match found: "${localVariableName}" → "${libVarStub.name}" (${expectedResolvedType})`);
                 return importedVariable;
             }
         }
@@ -1343,13 +1349,19 @@ async function matchVariableToLibrary(localVariableName, libraryCollectionId) {
             const componentPrefixedName = `${prefix}/${localVariableName}`;
             for (const libVarStub of libraryVariablesInCollection) {
                 if (libVarStub.name === componentPrefixedName) {
-                    console.log(`✅ Component-prefixed match found: "${localVariableName}" → "${libVarStub.name}"`);
                     const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+                    // Validate that the types match
+                    if (importedVariable.resolvedType !== expectedResolvedType) {
+                        console.warn(`⚠️ Component-prefixed match found but type mismatch: "${localVariableName}" → "${componentPrefixedName}" ` +
+                            `(expected ${expectedResolvedType}, got ${importedVariable.resolvedType}). Skipping.`);
+                        continue;
+                    }
+                    console.log(`✅ Component-prefixed match found: "${localVariableName}" → "${libVarStub.name}" (${expectedResolvedType})`);
                     return importedVariable;
                 }
             }
         }
-        console.log(`❌ No match found for "${localVariableName}" in library`);
+        console.log(`❌ No match found for "${localVariableName}" with type ${expectedResolvedType} in library`);
         return null;
     }
     catch (error) {
@@ -1431,8 +1443,8 @@ async function mapLocalVariablesToLibrary(localVariableIds, libraryCollectionId)
             });
             continue;
         }
-        // Try to match this local variable to a library variable
-        const libraryVariable = await matchVariableToLibrary(localVariable.name, libraryCollectionId);
+        // Try to match this local variable to a library variable (with type validation)
+        const libraryVariable = await matchVariableToLibrary(localVariable.name, libraryCollectionId, localVariable.variableObject.resolvedType);
         if (!libraryVariable) {
             results.push({
                 localVariableName: localVariable.name,
