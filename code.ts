@@ -1696,11 +1696,29 @@ async function mapLocalVariablesToLibrary(
   const allLocalVariables = await getLocalColorVariables();
   const localVariableMap = new Map(allLocalVariables.map(v => [v.id, v]));
 
-  // Get nodes to process (selection or entire page)
+  // Get nodes to process (ONLY from selection - safety check)
   const selection = figma.currentPage.selection;
-  const nodesToProcess = selection.length > 0 ? selection : figma.currentPage.children;
 
-  console.log(`Processing ${nodesToProcess.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes`);
+  // Safety check: only process if there's an actual selection
+  if (selection.length === 0) {
+    console.warn("No selection - aborting variable mapping to prevent unintended changes");
+    // Return empty results for all variables
+    return localVariableIds.map(id => {
+      const localVar = localVariableMap.get(id);
+      return {
+        localVariableName: localVar?.name || 'Unknown',
+        localVariableId: id,
+        libraryVariableName: null,
+        libraryVariableId: null,
+        success: false,
+        error: 'No selection - please select frames/components to process',
+        affectedNodes: 0
+      };
+    });
+  }
+
+  const nodesToProcess = selection;
+  console.log(`Processing ${nodesToProcess.length} selected nodes`);
 
   // Process each selected local variable
   for (const localVariableId of localVariableIds) {
