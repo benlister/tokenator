@@ -256,7 +256,7 @@
 </div>
 
 <!-- Map Local Variables Section -->
-<div class="section" style="margin-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 16px">
+<div id="map-variables-section" class="section" style="margin-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 16px; display: none">
   <details style="margin-bottom: 12px">
     <summary
       style="
@@ -767,6 +767,15 @@
 
     // Add API check message handling
 
+
+    // Handle selection changes - show/hide Map Local Variables section
+    if (message.type === "selection-changed") {
+      const mapVariablesSection = document.getElementById("map-variables-section");
+      if (mapVariablesSection) {
+        mapVariablesSection.style.display = message.hasSelection ? "block" : "none";
+      }
+      return;
+    }
     // Handle local color variables loaded
     if (message.type === "local-color-variables-loaded") {
       localColorVariables = message.variables;

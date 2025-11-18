@@ -3,6 +3,23 @@
 
 figma.showUI(__html__, { width: 300, height: 585 });
 
+// Send initial selection state to UI
+function updateSelectionState() {
+  const hasSelection = figma.currentPage.selection.length > 0;
+  figma.ui.postMessage({
+    type: 'selection-changed',
+    hasSelection: hasSelection
+  });
+}
+
+// Listen for selection changes
+figma.on('selectionchange', () => {
+  updateSelectionState();
+});
+
+// Send initial selection state
+updateSelectionState();
+
 // API Availability
 const hasVariablesAPI = Boolean(figma.variables);
 const hasGetLocalVariables = Boolean(hasVariablesAPI && figma.variables.getLocalVariablesAsync);
