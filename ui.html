@@ -254,6 +254,80 @@
     Undo Tokenate (replace with static values)
   </button>
 </div>
+
+<!-- Map Local Variables Section -->
+<div id="map-variables-section" class="section" style="margin-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 16px; display: none">
+  <details style="margin-bottom: 12px">
+    <summary
+      style="
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 8px;
+        list-style: none;
+        display: flex;
+        align-items: center;
+      "
+    >
+      <span style="margin-right: 4px"></span>
+      Map Local Variables to Library
+      <span style="margin-left: auto; font-size: 10px">▼</span>
+    </summary>
+
+    <div style="margin-top: 8px">
+      <p style="font-size: 10px; margin-bottom: 12px; color: rgba(255, 255, 255, 0.7)">
+        Migrate local color variables to library variables. Updates all bindings in the current selection.
+      </p>
+
+      <!-- Library selection -->
+      <div style="margin-bottom: 12px">
+        <label style="font-size: 10px; display: block; margin-bottom: 4px">Target Library</label>
+        <select
+          id="library-collection-select"
+          style="
+            width: 100%;
+            padding: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 11px;
+          "
+        >
+          <option value="">Select a library...</option>
+        </select>
+      </div>
+
+      <!-- Local variables list -->
+      <div
+        id="local-variables-container"
+        style="
+          margin-bottom: 12px;
+          padding: 8px;
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 4px;
+          max-height: 200px;
+          overflow-y: auto;
+        "
+      >
+        <div style="font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; padding: 12px">
+          Load local variables to begin
+        </div>
+      </div>
+
+      <!-- Action buttons -->
+      <button id="load-local-variables" class="secondary" style="margin-bottom: 8px">
+        Load Local Color Variables
+      </button>
+      <button id="map-to-library" class="primary" disabled>
+        Map to Library
+      </button>
+
+      <!-- Results -->
+      <div id="mapping-results" style="display: none; margin-top: 12px"></div>
+    </div>
+  </details>
+</div>
 <script>
   // State management
   let availableCollections = [];
@@ -412,6 +486,154 @@
     }
   };
 
+  // Variable mapping state
+  let localColorVariables = [];
+  let selectedVariableIds = [];
+
+  // Load local color variables
+  document.getElementById("load-local-variables").onclick = () => {
+    const container = document.getElementById("local-variables-container");
+    container.innerHTML = '<div style="font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; padding: 12px">Loading...</div>';
+
+    // Also load library collections for the dropdown
+    parent.postMessage({ pluginMessage: { type: "get-library-collections" } }, "*");
+    parent.postMessage({ pluginMessage: { type: "get-local-color-variables" } }, "*");
+  };
+
+  // Map to library button
+  document.getElementById("map-to-library").onclick = () => {
+    const libraryCollectionId = document.getElementById("library-collection-select").value;
+
+    if (!libraryCollectionId) {
+      alert("Please select a target library");
+      return;
+    }
+
+    if (selectedVariableIds.length === 0) {
+      alert("Please select at least one variable to map");
+      return;
+    }
+
+    const mappingResults = document.getElementById("mapping-results");
+    mappingResults.innerHTML = `<div style="font-size: 10px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 4px">Mapping ${selectedVariableIds.length} variables...</div>`;
+    mappingResults.style.display = "block";
+
+    parent.postMessage({
+      pluginMessage: {
+        type: "map-local-variables",
+        localVariableIds: selectedVariableIds,
+        libraryCollectionId: libraryCollectionId
+      }
+    }, "*");
+  };
+
+  function updateLocalVariablesList(variables) {
+    const container = document.getElementById("local-variables-container");
+
+    if (variables.length === 0) {
+      container.innerHTML = '<div style="font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; padding: 12px">No local color variables found</div>';
+      return;
+    }
+
+    let html = '<div style="font-size: 10px">';
+    html += '<div style="margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.1)">';
+    html += '<label style="display: flex; align-items: center; cursor: pointer">';
+    html += '<input type="checkbox" id="select-all-variables" style="margin-right: 6px"> Select All';
+    html += '</label>';
+    html += '</div>';
+
+    variables.forEach(variable => {
+      html += '<div style="margin-bottom: 6px">';
+      html += '<label style="display: flex; align-items: center; cursor: pointer">';
+      html += `<input type="checkbox" class="variable-checkbox" data-variable-id="${variable.id}" style="margin-right: 6px">`;
+      html += `<span title="${variable.collectionName}">${variable.name}</span>`;
+      html += '</label>';
+      html += '</div>';
+    });
+
+    html += '</div>';
+    container.innerHTML = html;
+
+    // Add event listeners for checkboxes
+    const checkboxes = container.querySelectorAll('.variable-checkbox');
+    const selectAllCheckbox = document.getElementById('select-all-variables');
+    const mapButton = document.getElementById('map-to-library');
+
+    function updateSelection() {
+      selectedVariableIds = Array.from(checkboxes)
+        .filter(cb => cb.checked)
+        .map(cb => cb.getAttribute('data-variable-id'));
+
+      // Enable/disable map button
+      mapButton.disabled = selectedVariableIds.length === 0;
+
+      // Update select all checkbox state
+      if (selectAllCheckbox) {
+        selectAllCheckbox.checked = selectedVariableIds.length === variables.length;
+        selectAllCheckbox.indeterminate = selectedVariableIds.length > 0 && selectedVariableIds.length < variables.length;
+      }
+    }
+
+    checkboxes.forEach(checkbox => {
+      checkbox.addEventListener('change', updateSelection);
+    });
+
+    if (selectAllCheckbox) {
+      selectAllCheckbox.addEventListener('change', (e) => {
+        checkboxes.forEach(cb => cb.checked = e.target.checked);
+        updateSelection();
+      });
+    }
+  }
+
+  function populateLibraryCollectionDropdown(collections) {
+    const select = document.getElementById("library-collection-select");
+
+    // Clear existing options except the first one
+    select.innerHTML = '<option value="">Select a library...</option>';
+
+    collections.forEach(collection => {
+      const option = document.createElement('option');
+      option.value = collection.id;
+      option.textContent = collection.name;
+      select.appendChild(option);
+    });
+  }
+
+  function displayMappingResults(results, successCount, failureCount, totalNodesAffected) {
+    const container = document.getElementById("mapping-results");
+
+    let html = '<div style="font-size: 10px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 4px">';
+    html += `<div style="margin-bottom: 8px; font-weight: 600">`;
+    html += `Mapping Complete: ${successCount} success, ${failureCount} failed, ${totalNodesAffected} nodes updated`;
+    html += '</div>';
+
+    results.forEach(result => {
+      const icon = result.success ? '✓' : '✗';
+      const color = result.success ? '#0aa356' : '#c11119';
+      const bgColor = result.success ? 'rgba(10, 163, 86, 0.1)' : 'rgba(193, 17, 25, 0.1)';
+
+      html += `<div style="margin-bottom: 4px; padding: 4px; background: ${bgColor}; border-radius: 3px">`;
+      html += `<span style="color: ${color}; margin-right: 4px">${icon}</span>`;
+      html += `<span style="color: ${color}">${result.localVariableName}</span>`;
+
+      if (result.success) {
+        html += ` → ${result.libraryVariableName}`;
+        if (result.affectedNodes > 0) {
+          html += ` <span style="opacity: 0.7">(${result.affectedNodes} nodes)</span>`;
+        }
+      } else {
+        html += ` <span style="opacity: 0.7">(${result.error})</span>`;
+      }
+
+      html += '</div>';
+    });
+
+    html += '</div>';
+    container.innerHTML = html;
+    container.style.display = "block";
+  }
+
   onmessage = (event) => {
     const message = event.data.pluginMessage;
     const results = document.getElementById("results");
@@ -544,6 +766,42 @@
     }
 
     // Add API check message handling
+
+
+    // Handle selection changes - show/hide Map Local Variables section
+    if (message.type === "selection-changed") {
+      const mapVariablesSection = document.getElementById("map-variables-section");
+      if (mapVariablesSection) {
+        mapVariablesSection.style.display = message.hasSelection ? "block" : "none";
+      }
+      return;
+    }
+    // Handle local color variables loaded
+    if (message.type === "local-color-variables-loaded") {
+      localColorVariables = message.variables;
+      updateLocalVariablesList(message.variables);
+      console.log(`Loaded ${message.variables.length} local color variables`);
+      return;
+    }
+
+    // Handle library collections loaded
+    if (message.type === "library-collections-loaded") {
+      populateLibraryCollectionDropdown(message.collections);
+      console.log(`Loaded ${message.collections.length} library collections`);
+      return;
+    }
+
+    // Handle mapping complete
+    if (message.type === "mapping-complete") {
+      displayMappingResults(
+        message.results,
+        message.successCount,
+        message.failureCount,
+        message.totalNodesAffected
+      );
+      console.log(`Mapping complete: ${message.successCount} success, ${message.failureCount} failed`);
+      return;
+    }
     if (message.type === "api-check") {
       results.style.display = "none";
     }

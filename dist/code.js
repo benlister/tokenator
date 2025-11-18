@@ -1,14 +1,19 @@
 /// <reference types="@figma/plugin-typings" />
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 figma.showUI(__html__, { width: 300, height: 585 });
+// Send initial selection state to UI
+function updateSelectionState() {
+    const hasSelection = figma.currentPage.selection.length > 0;
+    figma.ui.postMessage({
+        type: 'selection-changed',
+        hasSelection: hasSelection
+    });
+}
+// Listen for selection changes
+figma.on('selectionchange', () => {
+    updateSelectionState();
+});
+// Send initial selection state
+updateSelectionState();
 // API Availability
 const hasVariablesAPI = Boolean(figma.variables);
 const hasGetLocalVariables = Boolean(hasVariablesAPI && figma.variables.getLocalVariablesAsync);
@@ -80,273 +85,267 @@ figma.ui.postMessage({
     hasImportVariableByKey: hasImportVariableByKey,
 });
 // Replace your getAllVariablesAndImportLibraries function with this version
-function getAllVariablesAndImportLibraries() {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!hasVariablesAPI || !hasImportVariableByKey) {
-            console.warn("Variables API or importVariableByKeyAsync not available. Cannot fetch all variables.");
-            return [];
+async function getAllVariablesAndImportLibraries() {
+    if (!hasVariablesAPI || !hasImportVariableByKey) {
+        console.warn("Variables API or importVariableByKeyAsync not available. Cannot fetch all variables.");
+        return [];
+    }
+    const allVariables = [];
+    const processedVariableKeys = new Set();
+    console.log("Starting optimized variable collection...");
+    const startTime = Date.now();
+    // 1. Get Local Variables (usually fast)
+    if (hasGetLocalVariables) {
+        try {
+            console.log("Fetching local variables...");
+            const localStart = Date.now();
+            const localVariables = await figma.variables.getLocalVariablesAsync();
+            const localEnd = Date.now();
+            console.log(`Found ${localVariables.length} local variables in ${(localEnd - localStart)}ms`);
+            localVariables.forEach(v => {
+                if (!processedVariableKeys.has(v.key)) {
+                    allVariables.push(v);
+                    processedVariableKeys.add(v.key);
+                }
+            });
         }
-        const allVariables = [];
-        const processedVariableKeys = new Set();
-        console.log("Starting optimized variable collection...");
-        const startTime = Date.now();
-        // 1. Get Local Variables (usually fast)
-        if (hasGetLocalVariables) {
-            try {
-                console.log("Fetching local variables...");
-                const localStart = Date.now();
-                const localVariables = yield figma.variables.getLocalVariablesAsync();
-                const localEnd = Date.now();
-                console.log(`Found ${localVariables.length} local variables in ${(localEnd - localStart)}ms`);
-                localVariables.forEach(v => {
-                    if (!processedVariableKeys.has(v.key)) {
-                        allVariables.push(v);
-                        processedVariableKeys.add(v.key);
+        catch (error) {
+            console.error("Error getting local variables:", error);
+        }
+    }
+    // 2. Get Variables from Enabled Libraries - IMPORT ALL FLOAT VARIABLES
+    if (hasTeamLibraryAPI) {
+        try {
+            console.log("Fetching library collections...");
+            const libStart = Date.now();
+            const libraryCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+            const libCollectionEnd = Date.now();
+            console.log(`Found ${libraryCollections.length} library collections in ${(libCollectionEnd - libStart)}ms`);
+            // Process collections in batches to avoid overwhelming the API
+            const BATCH_SIZE = 5; // Process 5 variables at a time
+            for (const libCollection of libraryCollections) {
+                try {
+                    const collectionStart = Date.now();
+                    const libraryVariablesInCollection = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libCollection.key);
+                    // CHANGE: Import ALL variables instead of pre-filtering by name
+                    // We'll filter by actual resolvedType and name after importing
+                    console.log(`Collection "${libCollection.name}": ${libraryVariablesInCollection.length} total variables to process`);
+                    // Process in batches
+                    for (let i = 0; i < libraryVariablesInCollection.length; i += BATCH_SIZE) {
+                        const batch = libraryVariablesInCollection.slice(i, i + BATCH_SIZE);
+                        const batchPromises = batch.map(async (libVarStub) => {
+                            if (!processedVariableKeys.has(libVarStub.key)) {
+                                try {
+                                    const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+                                    return importedVariable;
+                                }
+                                catch (importError) {
+                                    console.error(`Error importing library variable '${libVarStub.name}' (key: ${libVarStub.key}):`, importError);
+                                    return null;
+                                }
+                            }
+                            return null;
+                        });
+                        const batchResults = await Promise.all(batchPromises);
+                        batchResults.forEach(variable => {
+                            if (variable && !processedVariableKeys.has(variable.key)) {
+                                allVariables.push(variable);
+                                processedVariableKeys.add(variable.key);
+                            }
+                        });
+                        // Small delay between batches to prevent API rate limiting
+                        if (i + BATCH_SIZE < libraryVariablesInCollection.length) {
+                            await new Promise(resolve => setTimeout(resolve, 50));
+                        }
                     }
+                    const collectionEnd = Date.now();
+                    console.log(`Processed collection "${libCollection.name}" in ${(collectionEnd - collectionStart)}ms`);
+                }
+                catch (collectionError) {
+                    console.error(`Error processing collection "${libCollection.name}":`, collectionError);
+                }
+            }
+        }
+        catch (error) {
+            console.error("Error getting library variables:", error);
+        }
+    }
+    const endTime = Date.now();
+    console.log(`Total variable collection completed in ${(endTime - startTime)}ms`);
+    console.log(`Total unique variables processed (local + imported library): ${allVariables.length}`);
+    return allVariables;
+}
+async function getSpacingVariables(forceRefresh = false, filterByCollectionId) {
+    const now = Date.now();
+    // Create cache key - use collection ID or 'all' for no filter
+    const cacheKey = filterByCollectionId || 'all';
+    // Check collection-specific cache
+    if (!forceRefresh && cachedSpacingTokensByCollection.has(cacheKey)) {
+        const cached = cachedSpacingTokensByCollection.get(cacheKey);
+        console.log(`Using cached spacing tokens for ${cacheKey} (${cached.length} tokens)`);
+        return cached;
+    }
+    console.log(`Fetching fresh spacing variables for collection: ${cacheKey}`);
+    const allResolvedVariables = await getAllVariablesAndImportLibraries();
+    console.log(`Processing ${allResolvedVariables.length} variables for spacing tokens.`);
+    const spacingTokens = [];
+    for (const variable of allResolvedVariables) {
+        if (variable.resolvedType !== 'FLOAT') {
+            continue;
+        }
+        // Filter by collection if specified
+        if (filterByCollectionId && variable.variableCollectionId !== filterByCollectionId) {
+            continue;
+        }
+        const variableName = variable.name;
+        const modeIds = Object.keys(variable.valuesByMode);
+        if (modeIds.length === 0) {
+            continue;
+        }
+        const firstModeId = modeIds[0];
+        const variableValue = variable.valuesByMode[firstModeId];
+        if (typeof variableValue === 'number' && variableValue >= 0) {
+            const isSpacingName = /space|spacing|gap|padding|margin|size|grid/i.test(variableName);
+            if (isSpacingName) {
+                spacingTokens.push({
+                    id: variable.id,
+                    key: variable.key,
+                    name: variableName,
+                    value: variableValue,
+                    variableObject: variable,
                 });
             }
-            catch (error) {
-                console.error("Error getting local variables:", error);
-            }
         }
-        // 2. Get Variables from Enabled Libraries - IMPORT ALL FLOAT VARIABLES
-        if (hasTeamLibraryAPI) {
-            try {
-                console.log("Fetching library collections...");
-                const libStart = Date.now();
-                const libraryCollections = yield figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
-                const libCollectionEnd = Date.now();
-                console.log(`Found ${libraryCollections.length} library collections in ${(libCollectionEnd - libStart)}ms`);
-                // Process collections in batches to avoid overwhelming the API
-                const BATCH_SIZE = 5; // Process 5 variables at a time
-                for (const libCollection of libraryCollections) {
-                    try {
-                        const collectionStart = Date.now();
-                        const libraryVariablesInCollection = yield figma.teamLibrary.getVariablesInLibraryCollectionAsync(libCollection.key);
-                        // CHANGE: Import ALL variables instead of pre-filtering by name
-                        // We'll filter by actual resolvedType and name after importing
-                        console.log(`Collection "${libCollection.name}": ${libraryVariablesInCollection.length} total variables to process`);
-                        // Process in batches
-                        for (let i = 0; i < libraryVariablesInCollection.length; i += BATCH_SIZE) {
-                            const batch = libraryVariablesInCollection.slice(i, i + BATCH_SIZE);
-                            const batchPromises = batch.map((libVarStub) => __awaiter(this, void 0, void 0, function* () {
-                                if (!processedVariableKeys.has(libVarStub.key)) {
-                                    try {
-                                        const importedVariable = yield figma.variables.importVariableByKeyAsync(libVarStub.key);
-                                        return importedVariable;
-                                    }
-                                    catch (importError) {
-                                        console.error(`Error importing library variable '${libVarStub.name}' (key: ${libVarStub.key}):`, importError);
-                                        return null;
-                                    }
-                                }
-                                return null;
-                            }));
-                            const batchResults = yield Promise.all(batchPromises);
-                            batchResults.forEach(variable => {
-                                if (variable && !processedVariableKeys.has(variable.key)) {
-                                    allVariables.push(variable);
-                                    processedVariableKeys.add(variable.key);
-                                }
-                            });
-                            // Small delay between batches to prevent API rate limiting
-                            if (i + BATCH_SIZE < libraryVariablesInCollection.length) {
-                                yield new Promise(resolve => setTimeout(resolve, 50));
-                            }
-                        }
-                        const collectionEnd = Date.now();
-                        console.log(`Processed collection "${libCollection.name}" in ${(collectionEnd - collectionStart)}ms`);
-                    }
-                    catch (collectionError) {
-                        console.error(`Error processing collection "${libCollection.name}":`, collectionError);
-                    }
-                }
-            }
-            catch (error) {
-                console.error("Error getting library variables:", error);
-            }
-        }
-        const endTime = Date.now();
-        console.log(`Total variable collection completed in ${(endTime - startTime)}ms`);
-        console.log(`Total unique variables processed (local + imported library): ${allVariables.length}`);
-        return allVariables;
-    });
-}
-function getSpacingVariables() {
-    return __awaiter(this, arguments, void 0, function* (forceRefresh = false, filterByCollectionId) {
-        const now = Date.now();
-        // Create cache key - use collection ID or 'all' for no filter
-        const cacheKey = filterByCollectionId || 'all';
-        // Check collection-specific cache
-        if (!forceRefresh && cachedSpacingTokensByCollection.has(cacheKey)) {
-            const cached = cachedSpacingTokensByCollection.get(cacheKey);
-            console.log(`Using cached spacing tokens for ${cacheKey} (${cached.length} tokens)`);
-            return cached;
-        }
-        console.log(`Fetching fresh spacing variables for collection: ${cacheKey}`);
-        const allResolvedVariables = yield getAllVariablesAndImportLibraries();
-        console.log(`Processing ${allResolvedVariables.length} variables for spacing tokens.`);
-        const spacingTokens = [];
-        for (const variable of allResolvedVariables) {
-            if (variable.resolvedType !== 'FLOAT') {
-                continue;
-            }
-            // Filter by collection if specified
-            if (filterByCollectionId && variable.variableCollectionId !== filterByCollectionId) {
-                continue;
-            }
-            const variableName = variable.name;
-            const modeIds = Object.keys(variable.valuesByMode);
-            if (modeIds.length === 0) {
-                continue;
-            }
-            const firstModeId = modeIds[0];
-            const variableValue = variable.valuesByMode[firstModeId];
-            if (typeof variableValue === 'number' && variableValue >= 0) {
-                const isSpacingName = /space|spacing|gap|padding|margin|size|grid/i.test(variableName);
-                if (isSpacingName) {
-                    spacingTokens.push({
-                        id: variable.id,
-                        key: variable.key,
-                        name: variableName,
-                        value: variableValue,
-                        variableObject: variable,
-                    });
-                }
-            }
-        }
-        // Cache the results by collection
-        cachedSpacingTokensByCollection.set(cacheKey, spacingTokens);
-        // Also update the legacy cache if this is for "all" collections
-        if (!filterByCollectionId) {
-            cachedSpacingTokens = spacingTokens;
-            cacheTimestamp = now;
-        }
-        console.log(`Total spacing tokens found and cached for ${cacheKey}: ${spacingTokens.length}`);
-        return spacingTokens;
-    });
+    }
+    // Cache the results by collection
+    cachedSpacingTokensByCollection.set(cacheKey, spacingTokens);
+    // Also update the legacy cache if this is for "all" collections
+    if (!filterByCollectionId) {
+        cachedSpacingTokens = spacingTokens;
+        cacheTimestamp = now;
+    }
+    console.log(`Total spacing tokens found and cached for ${cacheKey}: ${spacingTokens.length}`);
+    return spacingTokens;
 }
 function isAutoLayoutNode(node) {
     return node.type === "FRAME" || node.type === "COMPONENT" || node.type === "INSTANCE";
 }
-function findSpacingIssues(filterByCollectionId) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const spacingTokens = yield getSpacingVariables(false, filterByCollectionId);
-        const issues = [];
-        // Pre-create a Map for faster token lookup by value
-        const tokensByValue = new Map();
-        spacingTokens.forEach(token => {
-            tokensByValue.set(token.value, token);
-        });
-        function isIndividualPaddingBound(node, propertyName) {
-            var _a;
-            try {
-                return ((_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName]) !== undefined;
-            }
-            catch (e) {
-                console.warn(`Could not check boundVariables for ${node.name}.${propertyName}:`, e);
-                return false;
-            }
+async function findSpacingIssues(filterByCollectionId) {
+    const spacingTokens = await getSpacingVariables(false, filterByCollectionId);
+    const issues = [];
+    // Pre-create a Map for faster token lookup by value
+    const tokensByValue = new Map();
+    spacingTokens.forEach(token => {
+        tokensByValue.set(token.value, token);
+    });
+    function isIndividualPaddingBound(node, propertyName) {
+        var _a;
+        try {
+            return ((_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName]) !== undefined;
         }
-        function isHorizontalPaddingBound(node) {
-            return isIndividualPaddingBound(node, 'paddingLeft') && isIndividualPaddingBound(node, 'paddingRight');
+        catch (e) {
+            console.warn(`Could not check boundVariables for ${node.name}.${propertyName}:`, e);
+            return false;
         }
-        function isVerticalPaddingBound(node) {
-            return isIndividualPaddingBound(node, 'paddingTop') && isIndividualPaddingBound(node, 'paddingBottom');
-        }
-        // Optimized token lookup using Map
-        function findMatchingTokenByValue(value) {
-            return tokensByValue.get(value) || null;
-        }
-        function checkNode(node) {
-            if (isAutoLayoutNode(node)) {
-                if (node.layoutMode !== "NONE") {
-                    // Check itemSpacing
-                    if (node.itemSpacing !== undefined && node.itemSpacing > 0 && !isIndividualPaddingBound(node, 'itemSpacing')) {
-                        const token = findMatchingTokenByValue(node.itemSpacing);
-                        issues.push({
-                            node: node,
-                            property: "itemSpacing",
-                            currentValue: node.itemSpacing,
-                            matchingToken: token,
-                            message: token ? `Map to ${token.name} (${token.value}px)` : `No exact token for ${node.itemSpacing}px gap.`,
-                        });
-                        addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
-                    }
-                    // Check padding (existing logic remains the same)
-                    const { paddingTop, paddingBottom, paddingLeft, paddingRight } = node;
-                    const allPaddingsSameAndPositive = paddingTop > 0 && paddingTop === paddingBottom && paddingTop === paddingLeft && paddingTop === paddingRight;
-                    if (allPaddingsSameAndPositive &&
-                        !isIndividualPaddingBound(node, 'paddingTop') &&
-                        !isIndividualPaddingBound(node, 'paddingBottom') &&
-                        !isIndividualPaddingBound(node, 'paddingLeft') &&
-                        !isIndividualPaddingBound(node, 'paddingRight')) {
-                        const token = findMatchingTokenByValue(paddingTop);
-                        issues.push({ node, property: "paddingAll", currentValue: paddingTop, matchingToken: token, message: token ? `Map all padding to ${token.name}` : `No token for ${paddingTop}px uniform padding.` });
+    }
+    function isHorizontalPaddingBound(node) {
+        return isIndividualPaddingBound(node, 'paddingLeft') && isIndividualPaddingBound(node, 'paddingRight');
+    }
+    function isVerticalPaddingBound(node) {
+        return isIndividualPaddingBound(node, 'paddingTop') && isIndividualPaddingBound(node, 'paddingBottom');
+    }
+    // Optimized token lookup using Map
+    function findMatchingTokenByValue(value) {
+        return tokensByValue.get(value) || null;
+    }
+    function checkNode(node) {
+        if (isAutoLayoutNode(node)) {
+            if (node.layoutMode !== "NONE") {
+                // Check itemSpacing
+                if (node.itemSpacing !== undefined && node.itemSpacing > 0 && !isIndividualPaddingBound(node, 'itemSpacing')) {
+                    const token = findMatchingTokenByValue(node.itemSpacing);
+                    issues.push({
+                        node: node,
+                        property: "itemSpacing",
+                        currentValue: node.itemSpacing,
+                        matchingToken: token,
+                        message: token ? `Map to ${token.name} (${token.value}px)` : `No exact token for ${node.itemSpacing}px gap.`,
+                    });
+                    addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
+                }
+                // Check padding (existing logic remains the same)
+                const { paddingTop, paddingBottom, paddingLeft, paddingRight } = node;
+                const allPaddingsSameAndPositive = paddingTop > 0 && paddingTop === paddingBottom && paddingTop === paddingLeft && paddingTop === paddingRight;
+                if (allPaddingsSameAndPositive &&
+                    !isIndividualPaddingBound(node, 'paddingTop') &&
+                    !isIndividualPaddingBound(node, 'paddingBottom') &&
+                    !isIndividualPaddingBound(node, 'paddingLeft') &&
+                    !isIndividualPaddingBound(node, 'paddingRight')) {
+                    const token = findMatchingTokenByValue(paddingTop);
+                    issues.push({ node, property: "paddingAll", currentValue: paddingTop, matchingToken: token, message: token ? `Map all padding to ${token.name}` : `No token for ${paddingTop}px uniform padding.` });
+                    addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
+                }
+                else {
+                    // Handle horizontal padding
+                    if (paddingLeft > 0 && paddingLeft === paddingRight && !allPaddingsSameAndPositive && !isHorizontalPaddingBound(node)) {
+                        const token = findMatchingTokenByValue(paddingLeft);
+                        issues.push({ node, property: "horizontalPadding", currentValue: paddingLeft, matchingToken: token, message: token ? `Map horiz. padding to ${token.name}` : `No token for ${paddingLeft}px horiz. padding.` });
                         addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                     }
                     else {
-                        // Handle horizontal padding
-                        if (paddingLeft > 0 && paddingLeft === paddingRight && !allPaddingsSameAndPositive && !isHorizontalPaddingBound(node)) {
+                        // Individual left padding
+                        if (paddingLeft > 0 && !isIndividualPaddingBound(node, 'paddingLeft') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
                             const token = findMatchingTokenByValue(paddingLeft);
-                            issues.push({ node, property: "horizontalPadding", currentValue: paddingLeft, matchingToken: token, message: token ? `Map horiz. padding to ${token.name}` : `No token for ${paddingLeft}px horiz. padding.` });
+                            issues.push({ node, property: "paddingLeft", currentValue: paddingLeft, matchingToken: token, message: token ? `Map left padding to ${token.name}` : `No token for ${paddingLeft}px left padding.` });
                             addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                         }
-                        else {
-                            // Individual left padding
-                            if (paddingLeft > 0 && !isIndividualPaddingBound(node, 'paddingLeft') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
-                                const token = findMatchingTokenByValue(paddingLeft);
-                                issues.push({ node, property: "paddingLeft", currentValue: paddingLeft, matchingToken: token, message: token ? `Map left padding to ${token.name}` : `No token for ${paddingLeft}px left padding.` });
-                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
-                            }
-                            // Individual right padding
-                            if (paddingRight > 0 && !isIndividualPaddingBound(node, 'paddingRight') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
-                                const token = findMatchingTokenByValue(paddingRight);
-                                issues.push({ node, property: "paddingRight", currentValue: paddingRight, matchingToken: token, message: token ? `Map right padding to ${token.name}` : `No token for ${paddingRight}px right padding.` });
-                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
-                            }
+                        // Individual right padding
+                        if (paddingRight > 0 && !isIndividualPaddingBound(node, 'paddingRight') && !allPaddingsSameAndPositive && !(paddingLeft === paddingRight && !isHorizontalPaddingBound(node))) {
+                            const token = findMatchingTokenByValue(paddingRight);
+                            issues.push({ node, property: "paddingRight", currentValue: paddingRight, matchingToken: token, message: token ? `Map right padding to ${token.name}` : `No token for ${paddingRight}px right padding.` });
+                            addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                         }
-                        // Handle vertical padding
-                        if (paddingTop > 0 && paddingTop === paddingBottom && !allPaddingsSameAndPositive && !isVerticalPaddingBound(node)) {
+                    }
+                    // Handle vertical padding
+                    if (paddingTop > 0 && paddingTop === paddingBottom && !allPaddingsSameAndPositive && !isVerticalPaddingBound(node)) {
+                        const token = findMatchingTokenByValue(paddingTop);
+                        issues.push({ node, property: "verticalPadding", currentValue: paddingTop, matchingToken: token, message: token ? `Map vert. padding to ${token.name}` : `No token for ${paddingTop}px vert. padding.` });
+                        addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
+                    }
+                    else {
+                        // Individual top padding
+                        if (paddingTop > 0 && !isIndividualPaddingBound(node, 'paddingTop') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
                             const token = findMatchingTokenByValue(paddingTop);
-                            issues.push({ node, property: "verticalPadding", currentValue: paddingTop, matchingToken: token, message: token ? `Map vert. padding to ${token.name}` : `No token for ${paddingTop}px vert. padding.` });
+                            issues.push({ node, property: "paddingTop", currentValue: paddingTop, matchingToken: token, message: token ? `Map top padding to ${token.name}` : `No token for ${paddingTop}px top padding.` });
                             addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                         }
-                        else {
-                            // Individual top padding
-                            if (paddingTop > 0 && !isIndividualPaddingBound(node, 'paddingTop') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
-                                const token = findMatchingTokenByValue(paddingTop);
-                                issues.push({ node, property: "paddingTop", currentValue: paddingTop, matchingToken: token, message: token ? `Map top padding to ${token.name}` : `No token for ${paddingTop}px top padding.` });
-                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
-                            }
-                            // Individual bottom padding
-                            if (paddingBottom > 0 && !isIndividualPaddingBound(node, 'paddingBottom') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
-                                const token = findMatchingTokenByValue(paddingBottom);
-                                issues.push({ node, property: "paddingBottom", currentValue: paddingBottom, matchingToken: token, message: token ? `Map bottom padding to ${token.name}` : `No token for ${paddingBottom}px bottom padding.` });
-                                addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
-                            }
+                        // Individual bottom padding
+                        if (paddingBottom > 0 && !isIndividualPaddingBound(node, 'paddingBottom') && !allPaddingsSameAndPositive && !(paddingTop === paddingBottom && !isVerticalPaddingBound(node))) {
+                            const token = findMatchingTokenByValue(paddingBottom);
+                            issues.push({ node, property: "paddingBottom", currentValue: paddingBottom, matchingToken: token, message: token ? `Map bottom padding to ${token.name}` : `No token for ${paddingBottom}px bottom padding.` });
+                            addMarkerToNode(node, token ? "✅ Can Fix Spacing" : "⚠️ No Token Match", token !== null);
                         }
                     }
                 }
             }
-            // Recursively check children
-            if ("children" in node) {
-                for (const child of node.children) {
-                    checkNode(child);
-                }
+        }
+        // Recursively check children
+        if ("children" in node) {
+            for (const child of node.children) {
+                checkNode(child);
             }
         }
-        // Smart scoping: prioritize selection, but don't process entire page unnecessarily
-        const selection = figma.currentPage.selection;
-        const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
-        const collectionText = filterByCollectionId ? ` using collection filter` : '';
-        console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for spacing issues${collectionText}...`);
-        for (const node of nodesToCheck) {
-            checkNode(node);
-        }
-        console.log(`Found ${issues.length} potential spacing issues.`);
-        return issues;
-    });
+    }
+    // Smart scoping: prioritize selection, but don't process entire page unnecessarily
+    const selection = figma.currentPage.selection;
+    const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
+    const collectionText = filterByCollectionId ? ` using collection filter` : '';
+    console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for spacing issues${collectionText}...`);
+    for (const node of nodesToCheck) {
+        checkNode(node);
+    }
+    console.log(`Found ${issues.length} potential spacing issues.`);
+    return issues;
 }
 // Updated function to add color-coded markers based on whether the issue can be fixed
 // Updated function to add different markers based on issue type
@@ -401,178 +400,172 @@ function addMarkerToNode(node, name, canFix, issueType = 'spacing') {
     }
 }
 // trySetBoundVariable now accepts the full SpacingToken object
-function trySetBoundVariable(node, propertyName, token // Changed from variableId to the full token
+async function trySetBoundVariable(node, propertyName, token // Changed from variableId to the full token
 ) {
-    return __awaiter(this, void 0, void 0, function* () {
-        var _a;
-        try {
-            // Pass the actual Variable object from the token
-            console.log(`Binding ${node.name}.${propertyName} to variable: ${token.name} (ID: ${token.id})`);
-            node.setBoundVariable(propertyName, token.variableObject); // Use token.variableObject
-            // Verify using node.boundVariables and the token's ID
-            const boundVariableAlias = (_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName];
-            if (boundVariableAlias && boundVariableAlias.id === token.id) { // Compare with token.id
-                console.log(`Successfully bound ${propertyName} for ${node.name} to ${token.name}`);
-                return true;
-            }
-            else {
-                console.warn(`Verification failed for ${node.name}.${propertyName}. Bound alias:`, boundVariableAlias, `Expected ID: ${token.id}`);
-                return false;
-            }
+    var _a;
+    try {
+        // Pass the actual Variable object from the token
+        console.log(`Binding ${node.name}.${propertyName} to variable: ${token.name} (ID: ${token.id})`);
+        node.setBoundVariable(propertyName, token.variableObject); // Use token.variableObject
+        // Verify using node.boundVariables and the token's ID
+        const boundVariableAlias = (_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName];
+        if (boundVariableAlias && boundVariableAlias.id === token.id) { // Compare with token.id
+            console.log(`Successfully bound ${propertyName} for ${node.name} to ${token.name}`);
+            return true;
         }
-        catch (e) {
-            let message = 'Unknown error during binding';
-            if (e instanceof Error)
-                message = e.message;
-            else if (typeof e === 'string')
-                message = e;
-            console.error(`Error binding ${propertyName} for node ${node.name} to variable ${token.name} (ID: ${token.id}): ${message}`);
-            // Check if the variable object itself might be an issue (though less likely if it came from getSpacingVariables)
-            if (!token.variableObject || typeof token.variableObject.key !== 'string') {
-                console.error("The provided token.variableObject seems invalid:", token.variableObject);
-            }
+        else {
+            console.warn(`Verification failed for ${node.name}.${propertyName}. Bound alias:`, boundVariableAlias, `Expected ID: ${token.id}`);
             return false;
         }
-    });
+    }
+    catch (e) {
+        let message = 'Unknown error during binding';
+        if (e instanceof Error)
+            message = e.message;
+        else if (typeof e === 'string')
+            message = e;
+        console.error(`Error binding ${propertyName} for node ${node.name} to variable ${token.name} (ID: ${token.id}): ${message}`);
+        // Check if the variable object itself might be an issue (though less likely if it came from getSpacingVariables)
+        if (!token.variableObject || typeof token.variableObject.key !== 'string') {
+            console.error("The provided token.variableObject seems invalid:", token.variableObject);
+        }
+        return false;
+    }
 }
-function fixSpacingIssues(filterByCollectionId) {
-    return __awaiter(this, void 0, void 0, function* () {
-        clearMarkers();
-        const issues = yield findSpacingIssues(filterByCollectionId);
-        let fixedCount = 0;
-        let unfixableCount = 0;
-        const collectionText = filterByCollectionId ? ` using collection filter` : '';
-        console.log(`Attempting to fix ${issues.length} spacing issues${collectionText}.`);
-        // Count issues that don't have matching tokens
-        issues.forEach(issue => {
-            if (!issue.matchingToken) {
-                unfixableCount++;
-            }
-        });
-        for (const issue of issues) {
-            // Ensure matchingToken and its variableObject are valid before proceeding
-            if (issue.matchingToken && issue.matchingToken.variableObject) {
-                const { node, property, matchingToken } = issue;
-                let success = false;
-                if (property === "paddingAll") {
-                    const propsToBind = ['paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight'];
-                    let allSuccess = true;
-                    for (const p of propsToBind) {
-                        // Pass the full matchingToken
-                        if (!(yield trySetBoundVariable(node, p, matchingToken)))
-                            allSuccess = false;
-                    }
-                    success = allSuccess;
-                }
-                else if (property === "horizontalPadding") {
-                    // Pass the full matchingToken
-                    const S1 = yield trySetBoundVariable(node, 'paddingLeft', matchingToken);
-                    const S2 = yield trySetBoundVariable(node, 'paddingRight', matchingToken);
-                    success = S1 && S2;
-                }
-                else if (property === "verticalPadding") {
-                    // Pass the full matchingToken
-                    const S1 = yield trySetBoundVariable(node, 'paddingTop', matchingToken);
-                    const S2 = yield trySetBoundVariable(node, 'paddingBottom', matchingToken);
-                    success = S1 && S2;
-                }
-                else if (property === "itemSpacing" || property === "paddingLeft" || property === "paddingRight" || property === "paddingTop" || property === "paddingBottom") {
-                    // Pass the full matchingToken
-                    success = yield trySetBoundVariable(node, property, matchingToken);
-                }
-                if (success) {
-                    fixedCount++;
-                }
-            }
+async function fixSpacingIssues(filterByCollectionId) {
+    clearMarkers();
+    const issues = await findSpacingIssues(filterByCollectionId);
+    let fixedCount = 0;
+    let unfixableCount = 0;
+    const collectionText = filterByCollectionId ? ` using collection filter` : '';
+    console.log(`Attempting to fix ${issues.length} spacing issues${collectionText}.`);
+    // Count issues that don't have matching tokens
+    issues.forEach(issue => {
+        if (!issue.matchingToken) {
+            unfixableCount++;
         }
-        console.log(`Successfully applied ${fixedCount} spacing variable bindings.`);
-        console.log(`Unable to fix ${unfixableCount} issues due to missing matching tokens.`);
-        if (fixedCount > 0) {
-            figma.notify(`Applied ${fixedCount} spacing variable bindings. ${unfixableCount > 0 ? `${unfixableCount} values have no matching tokens (marked in red).` : ''}`);
-        }
-        else if (unfixableCount > 0) {
-            figma.notify(`Found ${unfixableCount} spacing values without matching tokens (marked in red).`);
-        }
-        else if (issues.length === 0) {
-            figma.notify(`No unlinked spacing values found.`);
-        }
-        // Instead of running findSpacingIssues again, let's return our counts
-        return { fixed: fixedCount, unfixable: unfixableCount };
     });
-}
-function revertSpacingBindingsToStatic() {
-    return __awaiter(this, void 0, void 0, function* () {
-        let revertedCount = 0;
-        // Helper function to remove binding and set static value
-        function removeBindingAndSetStatic(node, property) {
-            try {
-                // Check if the property has a binding
-                if (!node.boundVariables || !node.boundVariables[property]) {
-                    return false;
+    for (const issue of issues) {
+        // Ensure matchingToken and its variableObject are valid before proceeding
+        if (issue.matchingToken && issue.matchingToken.variableObject) {
+            const { node, property, matchingToken } = issue;
+            let success = false;
+            if (property === "paddingAll") {
+                const propsToBind = ['paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight'];
+                let allSuccess = true;
+                for (const p of propsToBind) {
+                    // Pass the full matchingToken
+                    if (!await trySetBoundVariable(node, p, matchingToken))
+                        allSuccess = false;
                 }
-                // Get the current computed value before removing the binding
-                const currentValue = node[property];
-                // Remove the binding
-                node.setBoundVariable(property, null);
-                // Set the static value to match what it was
-                node[property] = currentValue;
-                return true;
+                success = allSuccess;
             }
-            catch (e) {
-                console.error(`Error removing binding for ${property} on node "${node.name}":`, e);
+            else if (property === "horizontalPadding") {
+                // Pass the full matchingToken
+                const S1 = await trySetBoundVariable(node, 'paddingLeft', matchingToken);
+                const S2 = await trySetBoundVariable(node, 'paddingRight', matchingToken);
+                success = S1 && S2;
+            }
+            else if (property === "verticalPadding") {
+                // Pass the full matchingToken
+                const S1 = await trySetBoundVariable(node, 'paddingTop', matchingToken);
+                const S2 = await trySetBoundVariable(node, 'paddingBottom', matchingToken);
+                success = S1 && S2;
+            }
+            else if (property === "itemSpacing" || property === "paddingLeft" || property === "paddingRight" || property === "paddingTop" || property === "paddingBottom") {
+                // Pass the full matchingToken
+                success = await trySetBoundVariable(node, property, matchingToken);
+            }
+            if (success) {
+                fixedCount++;
+            }
+        }
+    }
+    console.log(`Successfully applied ${fixedCount} spacing variable bindings.`);
+    console.log(`Unable to fix ${unfixableCount} issues due to missing matching tokens.`);
+    if (fixedCount > 0) {
+        figma.notify(`Applied ${fixedCount} spacing variable bindings. ${unfixableCount > 0 ? `${unfixableCount} values have no matching tokens (marked in red).` : ''}`);
+    }
+    else if (unfixableCount > 0) {
+        figma.notify(`Found ${unfixableCount} spacing values without matching tokens (marked in red).`);
+    }
+    else if (issues.length === 0) {
+        figma.notify(`No unlinked spacing values found.`);
+    }
+    // Instead of running findSpacingIssues again, let's return our counts
+    return { fixed: fixedCount, unfixable: unfixableCount };
+}
+async function revertSpacingBindingsToStatic() {
+    let revertedCount = 0;
+    // Helper function to remove binding and set static value
+    function removeBindingAndSetStatic(node, property) {
+        try {
+            // Check if the property has a binding
+            if (!node.boundVariables || !node.boundVariables[property]) {
                 return false;
             }
+            // Get the current computed value before removing the binding
+            const currentValue = node[property];
+            // Remove the binding
+            node.setBoundVariable(property, null);
+            // Set the static value to match what it was
+            node[property] = currentValue;
+            return true;
         }
-        // Function to process a node and revert its spacing bindings
-        function processNode(node) {
-            let nodeRevertCount = 0;
-            if (isAutoLayoutNode(node)) {
-                // List of all potential spacing properties we might have bound
-                const spacingProperties = [
-                    'itemSpacing',
-                    'paddingTop',
-                    'paddingBottom',
-                    'paddingLeft',
-                    'paddingRight'
-                ];
-                // Check each property and revert if bound
-                for (const property of spacingProperties) {
-                    if (removeBindingAndSetStatic(node, property)) {
-                        nodeRevertCount++;
-                        console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
-                    }
+        catch (e) {
+            console.error(`Error removing binding for ${property} on node "${node.name}":`, e);
+            return false;
+        }
+    }
+    // Function to process a node and revert its spacing bindings
+    function processNode(node) {
+        let nodeRevertCount = 0;
+        if (isAutoLayoutNode(node)) {
+            // List of all potential spacing properties we might have bound
+            const spacingProperties = [
+                'itemSpacing',
+                'paddingTop',
+                'paddingBottom',
+                'paddingLeft',
+                'paddingRight'
+            ];
+            // Check each property and revert if bound
+            for (const property of spacingProperties) {
+                if (removeBindingAndSetStatic(node, property)) {
+                    nodeRevertCount++;
+                    console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
                 }
             }
-            // Process children recursively
-            if ("children" in node) {
-                for (const child of node.children) {
-                    nodeRevertCount += processNode(child);
-                }
+        }
+        // Process children recursively
+        if ("children" in node) {
+            for (const child of node.children) {
+                nodeRevertCount += processNode(child);
             }
-            return nodeRevertCount;
         }
-        // Get nodes to process (selection or all page nodes)
-        const nodesToProcess = figma.currentPage.selection.length > 0
-            ? figma.currentPage.selection
-            : figma.currentPage.children;
-        // Process all nodes
-        for (const node of nodesToProcess) {
-            revertedCount += processNode(node);
-        }
-        console.log(`Reverted ${revertedCount} spacing token bindings to static values.`);
-        return revertedCount;
-    });
+        return nodeRevertCount;
+    }
+    // Get nodes to process (selection or all page nodes)
+    const nodesToProcess = figma.currentPage.selection.length > 0
+        ? figma.currentPage.selection
+        : figma.currentPage.children;
+    // Process all nodes
+    for (const node of nodesToProcess) {
+        revertedCount += processNode(node);
+    }
+    console.log(`Reverted ${revertedCount} spacing token bindings to static values.`);
+    return revertedCount;
 }
 // Update to the message handler in the main code
 // Add this to your message handler - replace the existing figma.ui.onmessage
 // Updated message handler with all new border radius functionality
 // Enhanced message handler with collection filtering support
-figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
+figma.ui.onmessage = async (msg) => {
     console.log("Received message from UI:", msg.type);
     try {
         if (msg.type === 'get-collections') {
             // New message type to fetch available collections
-            const collections = yield getAvailableCollections();
+            const collections = await getAvailableCollections();
             figma.ui.postMessage({
                 type: 'collections-loaded',
                 collections: collections
@@ -583,7 +576,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             clearMarkers();
             const spacingCollectionId = msg.spacingCollectionId || undefined;
             const borderRadiusCollectionId = msg.borderRadiusCollectionId || undefined;
-            const results = yield findAllIssues(spacingCollectionId, borderRadiusCollectionId);
+            const results = await findAllIssues(spacingCollectionId, borderRadiusCollectionId);
             const uniqueNodeIds = new Set([
                 ...results.spacingIssues.map(issue => issue.node.id),
                 ...results.borderRadiusIssues.map(issue => issue.node.id)
@@ -615,7 +608,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             // Keep existing spacing-only function with optional collection filter
             clearMarkers();
             const spacingCollectionId = msg.spacingCollectionId || undefined;
-            const issues = yield findSpacingIssues(spacingCollectionId);
+            const issues = await findSpacingIssues(spacingCollectionId);
             const uniqueNodeIds = new Set(issues.map(issue => issue.node.id));
             const fixableIssues = issues.filter(issue => issue.matchingToken !== null);
             const unfixableIssues = issues.filter(issue => issue.matchingToken === null);
@@ -639,7 +632,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
         }
         else if (msg.type === 'fix-spacing-issues') {
             const spacingCollectionId = msg.spacingCollectionId || undefined;
-            const result = yield fixSpacingIssues(spacingCollectionId);
+            const result = await fixSpacingIssues(spacingCollectionId);
             figma.ui.postMessage({
                 type: 'spacing-issues-fixed',
                 fixedCount: result.fixed,
@@ -648,7 +641,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
         }
         else if (msg.type === 'fix-border-radius-issues') {
             const borderRadiusCollectionId = msg.borderRadiusCollectionId || undefined;
-            const result = yield fixBorderRadiusIssues(borderRadiusCollectionId);
+            const result = await fixBorderRadiusIssues(borderRadiusCollectionId);
             figma.ui.postMessage({
                 type: 'border-radius-issues-fixed',
                 fixedCount: result.fixed,
@@ -675,7 +668,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
         }
         else if (msg.type === 'revert-all-bindings') {
             // Updated revert function for both types
-            const result = yield revertAllBindingsToStatic();
+            const result = await revertAllBindingsToStatic();
             figma.ui.postMessage({
                 type: 'all-bindings-reverted',
                 spacingCount: result.spacingCount,
@@ -694,7 +687,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
         }
         else if (msg.type === 'revert-spacing-bindings') {
             // Keep old function for backwards compatibility
-            const revertedCount = yield revertSpacingBindingsToStatic();
+            const revertedCount = await revertSpacingBindingsToStatic();
             figma.ui.postMessage({
                 type: 'spacing-bindings-reverted',
                 count: revertedCount
@@ -712,7 +705,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             // Clear collection-specific caches
             cachedSpacingTokensByCollection.clear();
             cachedBorderRadiusTokensByCollection.clear();
-            yield Promise.all([
+            await Promise.all([
                 getSpacingVariables(true),
                 getBorderRadiusVariables(true),
                 getAvailableCollections(true)
@@ -722,8 +715,52 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
                 type: 'variables-refreshed'
             });
         }
+        else if (msg.type === 'get-local-color-variables') {
+            // Get local color variables for the mapping UI
+            const colorVariables = await getLocalColorVariables();
+            figma.ui.postMessage({
+                type: 'local-color-variables-loaded',
+                variables: colorVariables.map(v => ({
+                    id: v.id,
+                    name: v.name,
+                    collectionName: v.collectionName
+                }))
+            });
+        }
+        else if (msg.type === 'get-library-collections') {
+            // Get library collections (exclude local ones)
+            const allCollections = await getAvailableCollections();
+            const libraryCollections = allCollections.filter(c => !c.isLocal);
+            figma.ui.postMessage({
+                type: 'library-collections-loaded',
+                collections: libraryCollections
+            });
+        }
+        else if (msg.type === 'map-local-variables') {
+            // Execute variable mapping
+            const { localVariableIds, libraryCollectionId } = msg;
+            console.log(`Mapping ${localVariableIds.length} variables to library collection ${libraryCollectionId}`);
+            const results = await mapLocalVariablesToLibrary(localVariableIds, libraryCollectionId);
+            // Count successes and failures
+            const successCount = results.filter(r => r.success).length;
+            const failureCount = results.filter(r => !r.success).length;
+            const totalNodesAffected = results.reduce((sum, r) => sum + r.affectedNodes, 0);
+            figma.ui.postMessage({
+                type: 'mapping-complete',
+                results: results,
+                successCount: successCount,
+                failureCount: failureCount,
+                totalNodesAffected: totalNodesAffected
+            });
+            if (successCount > 0) {
+                figma.notify(`Mapped ${successCount} variables to library (${totalNodesAffected} nodes updated). ${failureCount > 0 ? `${failureCount} failed.` : ''}`);
+            }
+            else {
+                figma.notify(`Failed to map variables. Check console for details.`, { error: true });
+            }
+        }
         else if (msg.type === 'debug-collections') {
-            yield debugCollectionsAndVariables();
+            await debugCollectionsAndVariables();
             figma.notify("Debug complete - check console for details");
         }
     }
@@ -739,7 +776,7 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
         figma.notify(`Plugin error: ${message}. Check console.`, { error: true });
         figma.ui.postMessage({ type: 'error', message: message });
     }
-});
+};
 function clearMarkers() {
     try {
         const markers = figma.currentPage.children.filter(node => (node.type === "ELLIPSE" || node.type === "RECTANGLE") &&
@@ -770,491 +807,724 @@ function clearMarkers() {
         return 0;
     }
 }
-function findBorderRadiusIssues(filterByCollectionId) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const borderRadiusTokens = yield getBorderRadiusVariables(false, filterByCollectionId);
-        const issues = [];
-        // Pre-create a Map for faster token lookup by value
-        const tokensByValue = new Map();
-        borderRadiusTokens.forEach(token => {
-            tokensByValue.set(token.value, token);
-        });
-        function isIndividualRadiusBound(node, propertyName) {
-            var _a;
-            try {
-                return ((_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName]) !== undefined;
-            }
-            catch (e) {
-                console.warn(`Could not check boundVariables for ${node.name}.${propertyName}:`, e);
-                return false;
-            }
-        }
-        function areAllRadiiSameAndPositive(node) {
-            if (!hasRadiusProperties(node))
-                return false;
-            const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
-            return topLeftRadius > 0 &&
-                topLeftRadius === topRightRadius &&
-                topLeftRadius === bottomLeftRadius &&
-                topLeftRadius === bottomRightRadius;
-        }
-        function areAllRadiiBound(node) {
-            return isIndividualRadiusBound(node, 'topLeftRadius') &&
-                isIndividualRadiusBound(node, 'topRightRadius') &&
-                isIndividualRadiusBound(node, 'bottomLeftRadius') &&
-                isIndividualRadiusBound(node, 'bottomRightRadius');
-        }
-        // Optimized token lookup using Map
-        function findMatchingTokenByValue(value) {
-            return tokensByValue.get(value) || null;
-        }
-        function checkNode(node) {
-            if (isBorderRadiusNode(node) && hasRadiusProperties(node)) {
-                const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
-                const allRadiiSameAndPositive = areAllRadiiSameAndPositive(node);
-                // Check if all radii are the same and can be unified
-                if (allRadiiSameAndPositive && !areAllRadiiBound(node)) {
-                    const token = findMatchingTokenByValue(topLeftRadius);
-                    issues.push({
-                        node,
-                        property: "borderRadiusAll",
-                        currentValue: topLeftRadius,
-                        matchingToken: token,
-                        message: token ? `Map all corners to ${token.name}` : `No token for ${topLeftRadius}px uniform radius.`
-                    });
-                    addMarkerToNode(node, token ? "✅ Can Fix Border Radius" : "⚠️ No Radius Token", token !== null, 'borderRadius');
-                }
-                else {
-                    // Check individual corner radii
-                    const radiiToCheck = [
-                        { value: topLeftRadius, property: 'topLeftRadius', displayName: 'top-left' },
-                        { value: topRightRadius, property: 'topRightRadius', displayName: 'top-right' },
-                        { value: bottomLeftRadius, property: 'bottomLeftRadius', displayName: 'bottom-left' },
-                        { value: bottomRightRadius, property: 'bottomRightRadius', displayName: 'bottom-right' }
-                    ];
-                    for (const radius of radiiToCheck) {
-                        if (radius.value > 0 && !isIndividualRadiusBound(node, radius.property) && !allRadiiSameAndPositive) {
-                            const token = findMatchingTokenByValue(radius.value);
-                            issues.push({
-                                node,
-                                property: radius.property,
-                                currentValue: radius.value,
-                                matchingToken: token,
-                                message: token ? `Map ${radius.displayName} radius to ${token.name}` : `No token for ${radius.value}px ${radius.displayName} radius.`
-                            });
-                            addMarkerToNode(node, token ? "✅ Can Fix Border Radius" : "⚠️ No Radius Token", token !== null, 'borderRadius');
-                        }
-                    }
-                }
-            }
-            // Recursively check children
-            if ("children" in node) {
-                for (const child of node.children) {
-                    checkNode(child);
-                }
-            }
-        }
-        // Smart scoping: prioritize selection, but don't process entire page unnecessarily
-        const selection = figma.currentPage.selection;
-        const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
-        const collectionText = filterByCollectionId ? ` using collection filter` : '';
-        console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for border radius issues${collectionText}...`);
-        for (const node of nodesToCheck) {
-            checkNode(node);
-        }
-        console.log(`Found ${issues.length} potential border radius issues.`);
-        return issues;
+async function findBorderRadiusIssues(filterByCollectionId) {
+    const borderRadiusTokens = await getBorderRadiusVariables(false, filterByCollectionId);
+    const issues = [];
+    // Pre-create a Map for faster token lookup by value
+    const tokensByValue = new Map();
+    borderRadiusTokens.forEach(token => {
+        tokensByValue.set(token.value, token);
     });
-}
-function findAllIssues(spacingCollectionId, borderRadiusCollectionId) {
-    return __awaiter(this, void 0, void 0, function* () {
-        console.log("Finding all tokenization issues with collection filters...");
-        // Run both detection functions with their respective collection filters
-        const [spacingIssues, borderRadiusIssues] = yield Promise.all([
-            findSpacingIssues(spacingCollectionId),
-            findBorderRadiusIssues(borderRadiusCollectionId)
-        ]);
-        const totalIssues = spacingIssues.length + borderRadiusIssues.length;
-        const fixableIssues = spacingIssues.filter(issue => issue.matchingToken !== null).length +
-            borderRadiusIssues.filter(issue => issue.matchingToken !== null).length;
-        const unfixableIssues = totalIssues - fixableIssues;
-        return {
-            spacingIssues,
-            borderRadiusIssues,
-            totalIssues,
-            fixableIssues,
-            unfixableIssues
-        };
-    });
-}
-// Border radius binding function
-function trySetBoundVariableRadius(node, propertyName, token) {
-    return __awaiter(this, void 0, void 0, function* () {
+    function isIndividualRadiusBound(node, propertyName) {
         var _a;
         try {
-            console.log(`Binding ${node.name}.${propertyName} to variable: ${token.name} (ID: ${token.id})`);
-            node.setBoundVariable(propertyName, token.variableObject);
-            // Verify using node.boundVariables and the token's ID
-            const boundVariableAlias = (_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName];
-            if (boundVariableAlias && boundVariableAlias.id === token.id) {
-                console.log(`Successfully bound ${propertyName} for ${node.name} to ${token.name}`);
-                return true;
-            }
-            else {
-                console.warn(`Verification failed for ${node.name}.${propertyName}. Bound alias:`, boundVariableAlias, `Expected ID: ${token.id}`);
-                return false;
-            }
+            return ((_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName]) !== undefined;
         }
         catch (e) {
-            let message = 'Unknown error during binding';
-            if (e instanceof Error)
-                message = e.message;
-            else if (typeof e === 'string')
-                message = e;
-            console.error(`Error binding ${propertyName} for node ${node.name} to variable ${token.name} (ID: ${token.id}): ${message}`);
-            if (!token.variableObject || typeof token.variableObject.key !== 'string') {
-                console.error("The provided token.variableObject seems invalid:", token.variableObject);
-            }
+            console.warn(`Could not check boundVariables for ${node.name}.${propertyName}:`, e);
             return false;
         }
-    });
+    }
+    function areAllRadiiSameAndPositive(node) {
+        if (!hasRadiusProperties(node))
+            return false;
+        const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
+        return topLeftRadius > 0 &&
+            topLeftRadius === topRightRadius &&
+            topLeftRadius === bottomLeftRadius &&
+            topLeftRadius === bottomRightRadius;
+    }
+    function areAllRadiiBound(node) {
+        return isIndividualRadiusBound(node, 'topLeftRadius') &&
+            isIndividualRadiusBound(node, 'topRightRadius') &&
+            isIndividualRadiusBound(node, 'bottomLeftRadius') &&
+            isIndividualRadiusBound(node, 'bottomRightRadius');
+    }
+    // Optimized token lookup using Map
+    function findMatchingTokenByValue(value) {
+        return tokensByValue.get(value) || null;
+    }
+    function checkNode(node) {
+        if (isBorderRadiusNode(node) && hasRadiusProperties(node)) {
+            const { topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius } = node;
+            const allRadiiSameAndPositive = areAllRadiiSameAndPositive(node);
+            // Check if all radii are the same and can be unified
+            if (allRadiiSameAndPositive && !areAllRadiiBound(node)) {
+                const token = findMatchingTokenByValue(topLeftRadius);
+                issues.push({
+                    node,
+                    property: "borderRadiusAll",
+                    currentValue: topLeftRadius,
+                    matchingToken: token,
+                    message: token ? `Map all corners to ${token.name}` : `No token for ${topLeftRadius}px uniform radius.`
+                });
+                addMarkerToNode(node, token ? "✅ Can Fix Border Radius" : "⚠️ No Radius Token", token !== null, 'borderRadius');
+            }
+            else {
+                // Check individual corner radii
+                const radiiToCheck = [
+                    { value: topLeftRadius, property: 'topLeftRadius', displayName: 'top-left' },
+                    { value: topRightRadius, property: 'topRightRadius', displayName: 'top-right' },
+                    { value: bottomLeftRadius, property: 'bottomLeftRadius', displayName: 'bottom-left' },
+                    { value: bottomRightRadius, property: 'bottomRightRadius', displayName: 'bottom-right' }
+                ];
+                for (const radius of radiiToCheck) {
+                    if (radius.value > 0 && !isIndividualRadiusBound(node, radius.property) && !allRadiiSameAndPositive) {
+                        const token = findMatchingTokenByValue(radius.value);
+                        issues.push({
+                            node,
+                            property: radius.property,
+                            currentValue: radius.value,
+                            matchingToken: token,
+                            message: token ? `Map ${radius.displayName} radius to ${token.name}` : `No token for ${radius.value}px ${radius.displayName} radius.`
+                        });
+                        addMarkerToNode(node, token ? "✅ Can Fix Border Radius" : "⚠️ No Radius Token", token !== null, 'borderRadius');
+                    }
+                }
+            }
+        }
+        // Recursively check children
+        if ("children" in node) {
+            for (const child of node.children) {
+                checkNode(child);
+            }
+        }
+    }
+    // Smart scoping: prioritize selection, but don't process entire page unnecessarily
+    const selection = figma.currentPage.selection;
+    const nodesToCheck = selection.length > 0 ? selection : figma.currentPage.children;
+    const collectionText = filterByCollectionId ? ` using collection filter` : '';
+    console.log(`Analyzing ${nodesToCheck.length} ${selection.length > 0 ? 'selected' : 'top-level'} nodes for border radius issues${collectionText}...`);
+    for (const node of nodesToCheck) {
+        checkNode(node);
+    }
+    console.log(`Found ${issues.length} potential border radius issues.`);
+    return issues;
+}
+async function findAllIssues(spacingCollectionId, borderRadiusCollectionId) {
+    console.log("Finding all tokenization issues with collection filters...");
+    // Run both detection functions with their respective collection filters
+    const [spacingIssues, borderRadiusIssues] = await Promise.all([
+        findSpacingIssues(spacingCollectionId),
+        findBorderRadiusIssues(borderRadiusCollectionId)
+    ]);
+    const totalIssues = spacingIssues.length + borderRadiusIssues.length;
+    const fixableIssues = spacingIssues.filter(issue => issue.matchingToken !== null).length +
+        borderRadiusIssues.filter(issue => issue.matchingToken !== null).length;
+    const unfixableIssues = totalIssues - fixableIssues;
+    return {
+        spacingIssues,
+        borderRadiusIssues,
+        totalIssues,
+        fixableIssues,
+        unfixableIssues
+    };
+}
+// Border radius binding function
+async function trySetBoundVariableRadius(node, propertyName, token) {
+    var _a;
+    try {
+        console.log(`Binding ${node.name}.${propertyName} to variable: ${token.name} (ID: ${token.id})`);
+        node.setBoundVariable(propertyName, token.variableObject);
+        // Verify using node.boundVariables and the token's ID
+        const boundVariableAlias = (_a = node.boundVariables) === null || _a === void 0 ? void 0 : _a[propertyName];
+        if (boundVariableAlias && boundVariableAlias.id === token.id) {
+            console.log(`Successfully bound ${propertyName} for ${node.name} to ${token.name}`);
+            return true;
+        }
+        else {
+            console.warn(`Verification failed for ${node.name}.${propertyName}. Bound alias:`, boundVariableAlias, `Expected ID: ${token.id}`);
+            return false;
+        }
+    }
+    catch (e) {
+        let message = 'Unknown error during binding';
+        if (e instanceof Error)
+            message = e.message;
+        else if (typeof e === 'string')
+            message = e;
+        console.error(`Error binding ${propertyName} for node ${node.name} to variable ${token.name} (ID: ${token.id}): ${message}`);
+        if (!token.variableObject || typeof token.variableObject.key !== 'string') {
+            console.error("The provided token.variableObject seems invalid:", token.variableObject);
+        }
+        return false;
+    }
 }
 // Fix border radius issues
-function fixBorderRadiusIssues(filterByCollectionId) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const issues = yield findBorderRadiusIssues(filterByCollectionId);
-        let fixedCount = 0;
-        let unfixableCount = 0;
-        const collectionText = filterByCollectionId ? ` using collection filter` : '';
-        console.log(`Attempting to fix ${issues.length} border radius issues${collectionText}.`);
-        // Count issues that don't have matching tokens
-        issues.forEach(issue => {
-            if (!issue.matchingToken) {
-                unfixableCount++;
+async function fixBorderRadiusIssues(filterByCollectionId) {
+    const issues = await findBorderRadiusIssues(filterByCollectionId);
+    let fixedCount = 0;
+    let unfixableCount = 0;
+    const collectionText = filterByCollectionId ? ` using collection filter` : '';
+    console.log(`Attempting to fix ${issues.length} border radius issues${collectionText}.`);
+    // Count issues that don't have matching tokens
+    issues.forEach(issue => {
+        if (!issue.matchingToken) {
+            unfixableCount++;
+        }
+    });
+    for (const issue of issues) {
+        if (issue.matchingToken && issue.matchingToken.variableObject) {
+            const { node, property, matchingToken } = issue;
+            let success = false;
+            if (property === "borderRadiusAll") {
+                const propsToBind = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
+                let allSuccess = true;
+                for (const p of propsToBind) {
+                    if (!await trySetBoundVariableRadius(node, p, matchingToken))
+                        allSuccess = false;
+                }
+                success = allSuccess;
             }
-        });
-        for (const issue of issues) {
-            if (issue.matchingToken && issue.matchingToken.variableObject) {
-                const { node, property, matchingToken } = issue;
-                let success = false;
-                if (property === "borderRadiusAll") {
-                    const propsToBind = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
-                    let allSuccess = true;
-                    for (const p of propsToBind) {
-                        if (!(yield trySetBoundVariableRadius(node, p, matchingToken)))
-                            allSuccess = false;
-                    }
-                    success = allSuccess;
-                }
-                else if (property === "topLeftRadius" || property === "topRightRadius" || property === "bottomLeftRadius" || property === "bottomRightRadius") {
-                    success = yield trySetBoundVariableRadius(node, property, matchingToken);
-                }
-                if (success) {
-                    fixedCount++;
-                }
+            else if (property === "topLeftRadius" || property === "topRightRadius" || property === "bottomLeftRadius" || property === "bottomRightRadius") {
+                success = await trySetBoundVariableRadius(node, property, matchingToken);
+            }
+            if (success) {
+                fixedCount++;
             }
         }
-        console.log(`Successfully applied ${fixedCount} border radius variable bindings.`);
-        console.log(`Unable to fix ${unfixableCount} issues due to missing matching tokens.`);
-        return { fixed: fixedCount, unfixable: unfixableCount };
-    });
+    }
+    console.log(`Successfully applied ${fixedCount} border radius variable bindings.`);
+    console.log(`Unable to fix ${unfixableCount} issues due to missing matching tokens.`);
+    return { fixed: fixedCount, unfixable: unfixableCount };
 }
 // Updated revert function to handle both spacing and border radius
-function revertAllBindingsToStatic() {
-    return __awaiter(this, void 0, void 0, function* () {
-        let spacingRevertedCount = 0;
-        let borderRadiusRevertedCount = 0;
-        // Helper function to remove binding and set static value for spacing
-        function removeSpacingBindingAndSetStatic(node, property) {
-            try {
-                if (!node.boundVariables || !node.boundVariables[property]) {
-                    return false;
-                }
-                const currentValue = node[property];
-                node.setBoundVariable(property, null);
-                node[property] = currentValue;
-                return true;
-            }
-            catch (e) {
-                console.error(`Error removing spacing binding for ${property} on node "${node.name}":`, e);
+async function revertAllBindingsToStatic() {
+    let spacingRevertedCount = 0;
+    let borderRadiusRevertedCount = 0;
+    // Helper function to remove binding and set static value for spacing
+    function removeSpacingBindingAndSetStatic(node, property) {
+        try {
+            if (!node.boundVariables || !node.boundVariables[property]) {
                 return false;
             }
+            const currentValue = node[property];
+            node.setBoundVariable(property, null);
+            node[property] = currentValue;
+            return true;
         }
-        // Helper function to remove binding and set static value for border radius
-        function removeBorderRadiusBindingAndSetStatic(node, property) {
-            try {
-                if (!node.boundVariables || !node.boundVariables[property]) {
-                    return false;
-                }
-                const currentValue = node[property];
-                node.setBoundVariable(property, null);
-                node[property] = currentValue;
-                return true;
-            }
-            catch (e) {
-                console.error(`Error removing border radius binding for ${property} on node "${node.name}":`, e);
+        catch (e) {
+            console.error(`Error removing spacing binding for ${property} on node "${node.name}":`, e);
+            return false;
+        }
+    }
+    // Helper function to remove binding and set static value for border radius
+    function removeBorderRadiusBindingAndSetStatic(node, property) {
+        try {
+            if (!node.boundVariables || !node.boundVariables[property]) {
                 return false;
             }
+            const currentValue = node[property];
+            node.setBoundVariable(property, null);
+            node[property] = currentValue;
+            return true;
         }
-        // Function to process a node and revert its bindings
-        function processNode(node) {
-            let nodeSpacingRevertCount = 0;
-            let nodeBorderRadiusRevertCount = 0;
-            // Handle spacing properties
-            if (isAutoLayoutNode(node)) {
-                const spacingProperties = [
-                    'itemSpacing',
-                    'paddingTop',
-                    'paddingBottom',
-                    'paddingLeft',
-                    'paddingRight'
-                ];
-                for (const property of spacingProperties) {
-                    if (removeSpacingBindingAndSetStatic(node, property)) {
-                        nodeSpacingRevertCount++;
-                        console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
-                    }
+        catch (e) {
+            console.error(`Error removing border radius binding for ${property} on node "${node.name}":`, e);
+            return false;
+        }
+    }
+    // Function to process a node and revert its bindings
+    function processNode(node) {
+        let nodeSpacingRevertCount = 0;
+        let nodeBorderRadiusRevertCount = 0;
+        // Handle spacing properties
+        if (isAutoLayoutNode(node)) {
+            const spacingProperties = [
+                'itemSpacing',
+                'paddingTop',
+                'paddingBottom',
+                'paddingLeft',
+                'paddingRight'
+            ];
+            for (const property of spacingProperties) {
+                if (removeSpacingBindingAndSetStatic(node, property)) {
+                    nodeSpacingRevertCount++;
+                    console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
                 }
             }
-            // Handle border radius properties
-            if (isBorderRadiusNode(node)) {
-                const borderRadiusProperties = [
-                    'topLeftRadius',
-                    'topRightRadius',
-                    'bottomLeftRadius',
-                    'bottomRightRadius'
-                ];
-                for (const property of borderRadiusProperties) {
-                    if (removeBorderRadiusBindingAndSetStatic(node, property)) {
-                        nodeBorderRadiusRevertCount++;
-                        console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
-                    }
+        }
+        // Handle border radius properties
+        if (isBorderRadiusNode(node)) {
+            const borderRadiusProperties = [
+                'topLeftRadius',
+                'topRightRadius',
+                'bottomLeftRadius',
+                'bottomRightRadius'
+            ];
+            for (const property of borderRadiusProperties) {
+                if (removeBorderRadiusBindingAndSetStatic(node, property)) {
+                    nodeBorderRadiusRevertCount++;
+                    console.log(`Reverted ${property} on node "${node.name}" to static value ${node[property]}px`);
                 }
             }
-            // Process children recursively
-            if ("children" in node) {
-                for (const child of node.children) {
-                    const childResults = processNode(child);
-                    nodeSpacingRevertCount += childResults.spacing;
-                    nodeBorderRadiusRevertCount += childResults.borderRadius;
-                }
+        }
+        // Process children recursively
+        if ("children" in node) {
+            for (const child of node.children) {
+                const childResults = processNode(child);
+                nodeSpacingRevertCount += childResults.spacing;
+                nodeBorderRadiusRevertCount += childResults.borderRadius;
             }
-            return { spacing: nodeSpacingRevertCount, borderRadius: nodeBorderRadiusRevertCount };
         }
-        // Get nodes to process (selection or all page nodes)
-        const nodesToProcess = figma.currentPage.selection.length > 0
-            ? figma.currentPage.selection
-            : figma.currentPage.children;
-        // Process all nodes
-        for (const node of nodesToProcess) {
-            const results = processNode(node);
-            spacingRevertedCount += results.spacing;
-            borderRadiusRevertedCount += results.borderRadius;
-        }
-        const totalCount = spacingRevertedCount + borderRadiusRevertedCount;
-        console.log(`Reverted ${spacingRevertedCount} spacing token bindings and ${borderRadiusRevertedCount} border radius token bindings to static values.`);
-        return {
-            spacingCount: spacingRevertedCount,
-            borderRadiusCount: borderRadiusRevertedCount,
-            totalCount
-        };
-    });
+        return { spacing: nodeSpacingRevertCount, borderRadius: nodeBorderRadiusRevertCount };
+    }
+    // Get nodes to process (selection or all page nodes)
+    const nodesToProcess = figma.currentPage.selection.length > 0
+        ? figma.currentPage.selection
+        : figma.currentPage.children;
+    // Process all nodes
+    for (const node of nodesToProcess) {
+        const results = processNode(node);
+        spacingRevertedCount += results.spacing;
+        borderRadiusRevertedCount += results.borderRadius;
+    }
+    const totalCount = spacingRevertedCount + borderRadiusRevertedCount;
+    console.log(`Reverted ${spacingRevertedCount} spacing token bindings and ${borderRadiusRevertedCount} border radius token bindings to static values.`);
+    return {
+        spacingCount: spacingRevertedCount,
+        borderRadiusCount: borderRadiusRevertedCount,
+        totalCount
+    };
 }
 // Enhanced getAvailableCollections with better debugging
-function getAvailableCollections() {
-    return __awaiter(this, arguments, void 0, function* (forceRefresh = false) {
-        const now = Date.now();
-        if (!forceRefresh && cachedCollections && (now - collectionsTimestamp) < CACHE_DURATION) {
-            console.log(`Using cached collections (${cachedCollections.length} collections)`);
-            return cachedCollections;
-        }
-        const collections = [];
-        try {
-            // Get local collections
-            if (hasGetLocalVariableCollections) {
-                const localCollections = yield figma.variables.getLocalVariableCollectionsAsync();
-                localCollections.forEach(collection => {
-                    console.log(`📁 Local collection: "${collection.name}" → ID: ${collection.id}`);
-                    collections.push({
-                        id: collection.id,
-                        name: collection.name,
-                        isLocal: true
-                    });
+async function getAvailableCollections(forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && cachedCollections && (now - collectionsTimestamp) < CACHE_DURATION) {
+        console.log(`Using cached collections (${cachedCollections.length} collections)`);
+        return cachedCollections;
+    }
+    const collections = [];
+    try {
+        // Get local collections
+        if (hasGetLocalVariableCollections) {
+            const localCollections = await figma.variables.getLocalVariableCollectionsAsync();
+            localCollections.forEach(collection => {
+                console.log(`📁 Local collection: "${collection.name}" → ID: ${collection.id}`);
+                collections.push({
+                    id: collection.id,
+                    name: collection.name,
+                    isLocal: true
                 });
-                console.log(`Found ${localCollections.length} local collections`);
-            }
-            // Get library collections  
-            if (hasTeamLibraryAPI) {
-                const libraryCollections = yield figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
-                libraryCollections.forEach(collection => {
-                    console.log(`📚 Library collection: "${collection.name}" → Key: ${collection.key}`);
-                    collections.push({
-                        id: collection.key, // Note: library collections use 'key' not 'id'
-                        name: collection.name,
-                        isLocal: false
-                    });
+            });
+            console.log(`Found ${localCollections.length} local collections`);
+        }
+        // Get library collections  
+        if (hasTeamLibraryAPI) {
+            const libraryCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+            libraryCollections.forEach(collection => {
+                console.log(`📚 Library collection: "${collection.name}" → Key: ${collection.key}`);
+                collections.push({
+                    id: collection.key, // Note: library collections use 'key' not 'id'
+                    name: collection.name,
+                    isLocal: false
                 });
-                console.log(`Found ${libraryCollections.length} library collections`);
-            }
-            cachedCollections = collections;
-            collectionsTimestamp = now;
-            console.log(`Total collections cached: ${collections.length}`);
-            return collections;
+            });
+            console.log(`Found ${libraryCollections.length} library collections`);
         }
-        catch (error) {
-            console.error("Error fetching collections:", error);
-            return [];
-        }
-    });
+        cachedCollections = collections;
+        collectionsTimestamp = now;
+        console.log(`Total collections cached: ${collections.length}`);
+        return collections;
+    }
+    catch (error) {
+        console.error("Error fetching collections:", error);
+        return [];
+    }
 }
 // Move this debug function to be a standalone function (not nested inside another function)
 // Place this after your other utility functions but before the message handler
-function debugCollectionsAndVariables() {
-    return __awaiter(this, void 0, void 0, function* () {
-        console.log("🔍 DEBUG: Starting collection and variable analysis...");
-        try {
-            // 1. Check available collections
-            const collections = yield getAvailableCollections(true); // Force refresh
-            console.log(`📂 Found ${collections.length} total collections:`);
-            collections.forEach(collection => {
-                console.log(`  - ${collection.name} (${collection.isLocal ? 'Local' : 'Library'}) ID: ${collection.id}`);
-            });
-            // 2. Get all variables and check their collections
-            const allVariables = yield getAllVariablesAndImportLibraries();
-            console.log(`📊 Processing ${allVariables.length} total variables...`);
-            // Group variables by collection
-            const variablesByCollection = new Map();
-            allVariables.forEach(variable => {
-                const collectionId = variable.variableCollectionId;
-                if (!variablesByCollection.has(collectionId)) {
-                    variablesByCollection.set(collectionId, []);
-                }
-                variablesByCollection.get(collectionId).push(variable);
-            });
-            console.log(`📈 Variables grouped by collection:`);
-            variablesByCollection.forEach((variables, collectionId) => {
-                const collection = collections.find(c => c.id === collectionId);
-                const collectionName = collection ? collection.name : `Unknown (${collectionId})`;
-                // Count by type
-                const floatVars = variables.filter(v => v.resolvedType === 'FLOAT');
-                const spacingVars = floatVars.filter(v => /space|spacing|gap|padding|margin|size|grid/i.test(v.name));
-                const borderRadiusVars = floatVars.filter(v => /radius|corner|rounded|border.*radius|br-|curve|round/i.test(v.name));
-                console.log(`  📁 ${collectionName}:`);
-                console.log(`    - Total variables: ${variables.length}`);
-                console.log(`    - FLOAT variables: ${floatVars.length}`);
-                console.log(`    - Spacing candidates: ${spacingVars.length}`);
-                console.log(`    - Border radius candidates: ${borderRadiusVars.length}`);
-                if (borderRadiusVars.length > 0) {
-                    console.log(`    🎯 Border radius variables found:`);
-                    borderRadiusVars.forEach(v => {
-                        const value = v.valuesByMode[Object.keys(v.valuesByMode)[0]];
-                        console.log(`      - "${v.name}" = ${value}px`);
-                    });
-                }
-            });
-            // 3. Test the filtering functions
-            console.log(`🧪 Testing getBorderRadiusVariables() for each collection...`);
-            for (const collection of collections) {
-                const borderRadiusTokens = yield getBorderRadiusVariables(true, collection.id);
-                console.log(`  📍 Collection "${collection.name}": ${borderRadiusTokens.length} border radius tokens`);
+async function debugCollectionsAndVariables() {
+    console.log("🔍 DEBUG: Starting collection and variable analysis...");
+    try {
+        // 1. Check available collections
+        const collections = await getAvailableCollections(true); // Force refresh
+        console.log(`📂 Found ${collections.length} total collections:`);
+        collections.forEach(collection => {
+            console.log(`  - ${collection.name} (${collection.isLocal ? 'Local' : 'Library'}) ID: ${collection.id}`);
+        });
+        // 2. Get all variables and check their collections
+        const allVariables = await getAllVariablesAndImportLibraries();
+        console.log(`📊 Processing ${allVariables.length} total variables...`);
+        // Group variables by collection
+        const variablesByCollection = new Map();
+        allVariables.forEach(variable => {
+            const collectionId = variable.variableCollectionId;
+            if (!variablesByCollection.has(collectionId)) {
+                variablesByCollection.set(collectionId, []);
             }
-            // 4. Test without collection filter
-            const allBorderRadiusTokens = yield getBorderRadiusVariables(true);
-            console.log(`  📍 All collections: ${allBorderRadiusTokens.length} border radius tokens`);
+            variablesByCollection.get(collectionId).push(variable);
+        });
+        console.log(`📈 Variables grouped by collection:`);
+        variablesByCollection.forEach((variables, collectionId) => {
+            const collection = collections.find(c => c.id === collectionId);
+            const collectionName = collection ? collection.name : `Unknown (${collectionId})`;
+            // Count by type
+            const floatVars = variables.filter(v => v.resolvedType === 'FLOAT');
+            const spacingVars = floatVars.filter(v => /space|spacing|gap|padding|margin|size|grid/i.test(v.name));
+            const borderRadiusVars = floatVars.filter(v => /radius|corner|rounded|border.*radius|br-|curve|round/i.test(v.name));
+            console.log(`  📁 ${collectionName}:`);
+            console.log(`    - Total variables: ${variables.length}`);
+            console.log(`    - FLOAT variables: ${floatVars.length}`);
+            console.log(`    - Spacing candidates: ${spacingVars.length}`);
+            console.log(`    - Border radius candidates: ${borderRadiusVars.length}`);
+            if (borderRadiusVars.length > 0) {
+                console.log(`    🎯 Border radius variables found:`);
+                borderRadiusVars.forEach(v => {
+                    const value = v.valuesByMode[Object.keys(v.valuesByMode)[0]];
+                    console.log(`      - "${v.name}" = ${value}px`);
+                });
+            }
+        });
+        // 3. Test the filtering functions
+        console.log(`🧪 Testing getBorderRadiusVariables() for each collection...`);
+        for (const collection of collections) {
+            const borderRadiusTokens = await getBorderRadiusVariables(true, collection.id);
+            console.log(`  📍 Collection "${collection.name}": ${borderRadiusTokens.length} border radius tokens`);
         }
-        catch (error) {
-            console.error("❌ Debug function error:", error);
-        }
-    });
+        // 4. Test without collection filter
+        const allBorderRadiusTokens = await getBorderRadiusVariables(true);
+        console.log(`  📍 All collections: ${allBorderRadiusTokens.length} border radius tokens`);
+    }
+    catch (error) {
+        console.error("❌ Debug function error:", error);
+    }
 }
-function getBorderRadiusVariables() {
-    return __awaiter(this, arguments, void 0, function* (forceRefresh = false, filterByCollectionId) {
-        const now = Date.now();
-        // Create cache key
-        const cacheKey = filterByCollectionId || 'all';
-        // Check collection-specific cache
-        if (!forceRefresh && cachedBorderRadiusTokensByCollection.has(cacheKey)) {
-            const cached = cachedBorderRadiusTokensByCollection.get(cacheKey);
-            console.log(`Using cached border radius tokens for ${cacheKey} (${cached.length} tokens)`);
-            return cached;
+async function getBorderRadiusVariables(forceRefresh = false, filterByCollectionId) {
+    const now = Date.now();
+    // Create cache key
+    const cacheKey = filterByCollectionId || 'all';
+    // Check collection-specific cache
+    if (!forceRefresh && cachedBorderRadiusTokensByCollection.has(cacheKey)) {
+        const cached = cachedBorderRadiusTokensByCollection.get(cacheKey);
+        console.log(`Using cached border radius tokens for ${cacheKey} (${cached.length} tokens)`);
+        return cached;
+    }
+    console.log(`Fetching fresh border radius variables for collection: ${cacheKey}`);
+    const allResolvedVariables = await getAllVariablesAndImportLibraries();
+    console.log(`Processing ${allResolvedVariables.length} variables for border radius tokens.`);
+    const borderRadiusTokens = [];
+    // Enhanced debug: Let's see what variables we're processing
+    let floatVariableCount = 0;
+    let nameMatchCount = 0;
+    let debugVariableNames = [];
+    let collectionMatchCount = 0; // NEW: Track collection matches
+    for (const variable of allResolvedVariables) {
+        if (variable.resolvedType !== 'FLOAT') {
+            continue;
         }
-        console.log(`Fetching fresh border radius variables for collection: ${cacheKey}`);
-        const allResolvedVariables = yield getAllVariablesAndImportLibraries();
-        console.log(`Processing ${allResolvedVariables.length} variables for border radius tokens.`);
-        const borderRadiusTokens = [];
-        // Enhanced debug: Let's see what variables we're processing
-        let floatVariableCount = 0;
-        let nameMatchCount = 0;
-        let debugVariableNames = [];
-        let collectionMatchCount = 0; // NEW: Track collection matches
-        for (const variable of allResolvedVariables) {
-            if (variable.resolvedType !== 'FLOAT') {
+        floatVariableCount++;
+        const variableName = variable.name;
+        debugVariableNames.push(variableName);
+        // Enhanced collection filtering debug
+        if (filterByCollectionId) {
+            const variableCollectionId = variable.variableCollectionId;
+            console.log(`🔍 Collection check: "${variableName}" is in collection "${variableCollectionId}", looking for "${filterByCollectionId}"`);
+            if (variableCollectionId !== filterByCollectionId) {
+                console.log(`❌ Collection mismatch: skipping "${variableName}"`);
                 continue;
             }
-            floatVariableCount++;
-            const variableName = variable.name;
-            debugVariableNames.push(variableName);
-            // Enhanced collection filtering debug
-            if (filterByCollectionId) {
-                const variableCollectionId = variable.variableCollectionId;
-                console.log(`🔍 Collection check: "${variableName}" is in collection "${variableCollectionId}", looking for "${filterByCollectionId}"`);
-                if (variableCollectionId !== filterByCollectionId) {
-                    console.log(`❌ Collection mismatch: skipping "${variableName}"`);
+            else {
+                console.log(`✅ Collection match: including "${variableName}"`);
+                collectionMatchCount++;
+            }
+        }
+        const modeIds = Object.keys(variable.valuesByMode);
+        if (modeIds.length === 0) {
+            continue;
+        }
+        const firstModeId = modeIds[0];
+        const variableValue = variable.valuesByMode[firstModeId];
+        if (typeof variableValue === 'number' && variableValue >= 0) {
+            // Use the enhanced pattern matching function
+            const isBorderRadiusName = isBorderRadiusVariable(variableName);
+            // Debug logging
+            if (isBorderRadiusName) {
+                console.log(`✅ Border radius match: "${variableName}" = ${variableValue}px (Collection: ${variable.variableCollectionId})`);
+                nameMatchCount++;
+                borderRadiusTokens.push({
+                    id: variable.id,
+                    key: variable.key,
+                    name: variableName,
+                    value: variableValue,
+                    variableObject: variable,
+                });
+            }
+            else {
+                console.log(`❌ No pattern match: "${variableName}" (${variableValue}px)`);
+            }
+        }
+    }
+    // Enhanced debug output
+    console.log(`🔍 Border radius debug for ${cacheKey}:`);
+    console.log(`- Total variables processed: ${allResolvedVariables.length}`);
+    console.log(`- FLOAT variables: ${floatVariableCount}`);
+    console.log(`- Collection filter active: ${filterByCollectionId ? 'YES' : 'NO'}`);
+    if (filterByCollectionId) {
+        console.log(`- Variables matching collection: ${collectionMatchCount}`);
+    }
+    console.log(`- FLOAT variable names:`, debugVariableNames);
+    console.log(`- Pattern matches: ${nameMatchCount}`);
+    console.log(`- Final border radius tokens: ${borderRadiusTokens.length}`);
+    // Show unique collection IDs present in variables
+    const uniqueCollectionIds = [...new Set(allResolvedVariables.map(v => v.variableCollectionId))];
+    console.log(`📂 Collection IDs found in variables:`, uniqueCollectionIds);
+    // Cache the results by collection
+    cachedBorderRadiusTokensByCollection.set(cacheKey, borderRadiusTokens);
+    // Also update the legacy cache if this is for "all" collections
+    if (!filterByCollectionId) {
+        cachedBorderRadiusTokens = borderRadiusTokens;
+        borderRadiusCacheTimestamp = now;
+    }
+    console.log(`Total border radius tokens found and cached for ${cacheKey}: ${borderRadiusTokens.length}`);
+    return borderRadiusTokens;
+}
+// Get local color variables for variable mapping
+async function getLocalColorVariables() {
+    if (!hasGetLocalVariables) {
+        console.warn("getLocalVariablesAsync not available");
+        return [];
+    }
+    try {
+        const localVariables = await figma.variables.getLocalVariablesAsync();
+        const colorVariables = [];
+        // Get collection info for each variable
+        const collections = await getAvailableCollections();
+        const collectionMap = new Map(collections.map(c => [c.id, c]));
+        for (const variable of localVariables) {
+            // Only include COLOR type variables
+            if (variable.resolvedType !== 'COLOR') {
+                continue;
+            }
+            const collection = collectionMap.get(variable.variableCollectionId);
+            colorVariables.push({
+                id: variable.id,
+                key: variable.key,
+                name: variable.name,
+                variableObject: variable,
+                collectionId: variable.variableCollectionId,
+                collectionName: (collection === null || collection === void 0 ? void 0 : collection.name) || 'Unknown',
+                isLocal: true
+            });
+        }
+        console.log(`Found ${colorVariables.length} local color variables`);
+        return colorVariables;
+    }
+    catch (error) {
+        console.error("Error getting local color variables:", error);
+        return [];
+    }
+}
+// Match a local variable to a library variable by name and type
+// Supports two patterns:
+// 1. Exact match: "table--foreground-bright" → "table--foreground-bright"
+// 2. Component-prefixed: "table--foreground-bright" → "Table/table--foreground-bright"
+async function matchVariableToLibrary(localVariableName, libraryCollectionId, expectedResolvedType) {
+    try {
+        // Get all variables from the library collection
+        if (!hasTeamLibraryAPI) {
+            console.warn("Team Library API not available");
+            return null;
+        }
+        const libraryVariablesInCollection = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libraryCollectionId);
+        // First, try exact match
+        for (const libVarStub of libraryVariablesInCollection) {
+            if (libVarStub.name === localVariableName) {
+                const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+                // Validate that the types match
+                if (importedVariable.resolvedType !== expectedResolvedType) {
+                    console.warn(`⚠️ Name match found but type mismatch: "${localVariableName}" ` +
+                        `(expected ${expectedResolvedType}, got ${importedVariable.resolvedType}). Skipping.`);
                     continue;
                 }
-                else {
-                    console.log(`✅ Collection match: including "${variableName}"`);
-                    collectionMatchCount++;
-                }
+                console.log(`✅ Exact match found: "${localVariableName}" → "${libVarStub.name}" (${expectedResolvedType})`);
+                return importedVariable;
             }
-            const modeIds = Object.keys(variable.valuesByMode);
-            if (modeIds.length === 0) {
-                continue;
-            }
-            const firstModeId = modeIds[0];
-            const variableValue = variable.valuesByMode[firstModeId];
-            if (typeof variableValue === 'number' && variableValue >= 0) {
-                // Use the enhanced pattern matching function
-                const isBorderRadiusName = isBorderRadiusVariable(variableName);
-                // Debug logging
-                if (isBorderRadiusName) {
-                    console.log(`✅ Border radius match: "${variableName}" = ${variableValue}px (Collection: ${variable.variableCollectionId})`);
-                    nameMatchCount++;
-                    borderRadiusTokens.push({
-                        id: variable.id,
-                        key: variable.key,
-                        name: variableName,
-                        value: variableValue,
-                        variableObject: variable,
-                    });
-                }
-                else {
-                    console.log(`❌ No pattern match: "${variableName}" (${variableValue}px)`);
+        }
+        // Second, try component-prefixed pattern
+        // Extract potential component prefix from the variable name
+        // E.g., "table--foreground-bright" → try "Table/table--foreground-bright"
+        const potentialPrefixes = extractComponentPrefixes(localVariableName);
+        for (const prefix of potentialPrefixes) {
+            const componentPrefixedName = `${prefix}/${localVariableName}`;
+            for (const libVarStub of libraryVariablesInCollection) {
+                if (libVarStub.name === componentPrefixedName) {
+                    const importedVariable = await figma.variables.importVariableByKeyAsync(libVarStub.key);
+                    // Validate that the types match
+                    if (importedVariable.resolvedType !== expectedResolvedType) {
+                        console.warn(`⚠️ Component-prefixed match found but type mismatch: "${localVariableName}" → "${componentPrefixedName}" ` +
+                            `(expected ${expectedResolvedType}, got ${importedVariable.resolvedType}). Skipping.`);
+                        continue;
+                    }
+                    console.log(`✅ Component-prefixed match found: "${localVariableName}" → "${libVarStub.name}" (${expectedResolvedType})`);
+                    return importedVariable;
                 }
             }
         }
-        // Enhanced debug output
-        console.log(`🔍 Border radius debug for ${cacheKey}:`);
-        console.log(`- Total variables processed: ${allResolvedVariables.length}`);
-        console.log(`- FLOAT variables: ${floatVariableCount}`);
-        console.log(`- Collection filter active: ${filterByCollectionId ? 'YES' : 'NO'}`);
-        if (filterByCollectionId) {
-            console.log(`- Variables matching collection: ${collectionMatchCount}`);
+        console.log(`❌ No match found for "${localVariableName}" with type ${expectedResolvedType} in library`);
+        return null;
+    }
+    catch (error) {
+        console.error(`Error matching variable "${localVariableName}":`, error);
+        return null;
+    }
+}
+// Extract potential component prefixes from a variable name
+// E.g., "table--foreground-bright" → ["Table", "table"]
+// E.g., "button-primary" → ["Button", "button"]
+function extractComponentPrefixes(variableName) {
+    const prefixes = [];
+    // Split on common delimiters
+    const delimiters = ['--', '-', '_', '/'];
+    for (const delimiter of delimiters) {
+        if (variableName.includes(delimiter)) {
+            const parts = variableName.split(delimiter);
+            const firstPart = parts[0];
+            // Add capitalized version (e.g., "table" → "Table")
+            if (firstPart) {
+                const capitalized = firstPart.charAt(0).toUpperCase() + firstPart.slice(1);
+                if (!prefixes.includes(capitalized)) {
+                    prefixes.push(capitalized);
+                }
+                // Also add lowercase version
+                if (!prefixes.includes(firstPart)) {
+                    prefixes.push(firstPart);
+                }
+            }
+            break; // Only use the first delimiter found
         }
-        console.log(`- FLOAT variable names:`, debugVariableNames);
-        console.log(`- Pattern matches: ${nameMatchCount}`);
-        console.log(`- Final border radius tokens: ${borderRadiusTokens.length}`);
-        // Show unique collection IDs present in variables
-        const uniqueCollectionIds = [...new Set(allResolvedVariables.map(v => v.variableCollectionId))];
-        console.log(`📂 Collection IDs found in variables:`, uniqueCollectionIds);
-        // Cache the results by collection
-        cachedBorderRadiusTokensByCollection.set(cacheKey, borderRadiusTokens);
-        // Also update the legacy cache if this is for "all" collections
-        if (!filterByCollectionId) {
-            cachedBorderRadiusTokens = borderRadiusTokens;
-            borderRadiusCacheTimestamp = now;
+    }
+    return prefixes;
+}
+// Map local variables to library variables
+// This function:
+// 1. Matches selected local variables to library variables by name
+// 2. Updates all node bindings in the current selection to use library variables
+// 3. Returns detailed results for each variable mapping
+async function mapLocalVariablesToLibrary(localVariableIds, libraryCollectionId) {
+    const results = [];
+    console.log(`Starting variable mapping: ${localVariableIds.length} local variables to library collection ${libraryCollectionId}`);
+    // Get all local variables
+    const allLocalVariables = await getLocalColorVariables();
+    const localVariableMap = new Map(allLocalVariables.map(v => [v.id, v]));
+    // Get nodes to process (ONLY from selection - safety check)
+    const selection = figma.currentPage.selection;
+    // Safety check: only process if there's an actual selection
+    if (selection.length === 0) {
+        console.warn("No selection - aborting variable mapping to prevent unintended changes");
+        // Return empty results for all variables
+        return localVariableIds.map(id => {
+            const localVar = localVariableMap.get(id);
+            return {
+                localVariableName: (localVar === null || localVar === void 0 ? void 0 : localVar.name) || 'Unknown',
+                localVariableId: id,
+                libraryVariableName: null,
+                libraryVariableId: null,
+                success: false,
+                error: 'No selection - please select frames/components to process',
+                affectedNodes: 0
+            };
+        });
+    }
+    const nodesToProcess = selection;
+    console.log(`Processing ${nodesToProcess.length} selected nodes`);
+    // Process each selected local variable
+    for (const localVariableId of localVariableIds) {
+        const localVariable = localVariableMap.get(localVariableId);
+        if (!localVariable) {
+            results.push({
+                localVariableName: 'Unknown',
+                localVariableId: localVariableId,
+                libraryVariableName: null,
+                libraryVariableId: null,
+                success: false,
+                error: 'Local variable not found',
+                affectedNodes: 0
+            });
+            continue;
         }
-        console.log(`Total border radius tokens found and cached for ${cacheKey}: ${borderRadiusTokens.length}`);
-        return borderRadiusTokens;
-    });
+        // Try to match this local variable to a library variable (with type validation)
+        const libraryVariable = await matchVariableToLibrary(localVariable.name, libraryCollectionId, localVariable.variableObject.resolvedType);
+        if (!libraryVariable) {
+            results.push({
+                localVariableName: localVariable.name,
+                localVariableId: localVariable.id,
+                libraryVariableName: null,
+                libraryVariableId: null,
+                success: false,
+                error: 'No matching library variable found',
+                affectedNodes: 0
+            });
+            continue;
+        }
+        // Update all node bindings that reference this local variable
+        let affectedNodes = 0;
+        const processedNodeIds = new Set(); // Track processed nodes to avoid duplicates
+        function updateNodeBindings(node) {
+            // Skip if already processed (prevents duplicate processing when parent and child both selected)
+            if (processedNodeIds.has(node.id)) {
+                return;
+            }
+            processedNodeIds.add(node.id);
+            // Check if this node has any bound variables
+            if ('boundVariables' in node && node.boundVariables) {
+                let nodeUpdated = false;
+                // Iterate through all possible bound properties
+                for (const [propertyName, binding] of Object.entries(node.boundVariables)) {
+                    if (!binding)
+                        continue;
+                    // Handle both single bindings and array bindings
+                    if (Array.isArray(binding)) {
+                        // Array binding (e.g., fills, strokes, effects with multiple variables)
+                        // TODO: Implement array binding updates properly
+                        // The Figma API doesn't support setBoundVariable with an index parameter
+                        // We need to reconstruct the entire array with updated bindings
+                        const hasMatchingBinding = binding.some(item => item && 'id' in item && item.id === localVariable.id);
+                        if (hasMatchingBinding) {
+                            console.warn(`⚠️ Skipping array binding for ${node.name}.${propertyName} - ` +
+                                `array bindings not yet supported. This property has multiple bound variables ` +
+                                `and requires manual remapping.`);
+                        }
+                    }
+                    else {
+                        // Single binding (e.g., single fill, stroke, or other property)
+                        if ('id' in binding && binding.id === localVariable.id) {
+                            try {
+                                // Update the binding to use the library variable
+                                node.setBoundVariable(propertyName, libraryVariable);
+                                nodeUpdated = true;
+                                console.log(`Updated ${node.name}.${propertyName} from "${localVariable.name}" to "${libraryVariable.name}"`);
+                            }
+                            catch (error) {
+                                console.error(`Error updating binding for ${node.name}.${propertyName}:`, error);
+                            }
+                        }
+                    }
+                }
+                if (nodeUpdated) {
+                    affectedNodes++;
+                }
+            }
+            // Recursively process children
+            if ('children' in node) {
+                for (const child of node.children) {
+                    updateNodeBindings(child);
+                }
+            }
+        }
+        // Process all nodes
+        for (const node of nodesToProcess) {
+            updateNodeBindings(node);
+        }
+        results.push({
+            localVariableName: localVariable.name,
+            localVariableId: localVariable.id,
+            libraryVariableName: libraryVariable.name,
+            libraryVariableId: libraryVariable.id,
+            success: true,
+            affectedNodes: affectedNodes
+        });
+        console.log(`✅ Mapped "${localVariable.name}" → "${libraryVariable.name}" (${affectedNodes} nodes affected)`);
+    }
+    return results;
 }
