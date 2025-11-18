@@ -1771,18 +1771,20 @@ async function mapLocalVariablesToLibrary(
           // Handle both single bindings and array bindings
           if (Array.isArray(binding)) {
             // Array binding (e.g., fills, strokes, effects with multiple variables)
-            binding.forEach((item, index) => {
-              if (item && 'id' in item && item.id === localVariable.id) {
-                try {
-                  // Update the specific index in the array binding
-                  (node as any).setBoundVariable(propertyName, libraryVariable, index);
-                  nodeUpdated = true;
-                  console.log(`Updated ${node.name}.${propertyName}[${index}] from "${localVariable.name}" to "${libraryVariable.name}"`);
-                } catch (error) {
-                  console.error(`Error updating array binding for ${node.name}.${propertyName}[${index}]:`, error);
-                }
-              }
-            });
+            // TODO: Implement array binding updates properly
+            // The Figma API doesn't support setBoundVariable with an index parameter
+            // We need to reconstruct the entire array with updated bindings
+            const hasMatchingBinding = binding.some(item =>
+              item && 'id' in item && item.id === localVariable.id
+            );
+
+            if (hasMatchingBinding) {
+              console.warn(
+                `⚠️ Skipping array binding for ${node.name}.${propertyName} - ` +
+                `array bindings not yet supported. This property has multiple bound variables ` +
+                `and requires manual remapping.`
+              );
+            }
           } else {
             // Single binding (e.g., single fill, stroke, or other property)
             if ('id' in binding && binding.id === localVariable.id) {
